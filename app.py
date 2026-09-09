@@ -1,6 +1,6 @@
 from pathlib import Path
-import re
 import html
+import re
 
 import fitz
 import streamlit as st
@@ -11,7 +11,7 @@ from src.llm import ollama_chat
 
 
 # ============================================================
-# WEEK 4 CONFIGURATION
+# CONFIGURATION
 # ============================================================
 
 BAD_PATTERNS = [
@@ -22,22 +22,28 @@ BAD_PATTERNS = [
     "no researchers usefulness definition",
 ]
 
-# Minimum query coverage required before allowing an LLM answer.
 MIN_ANSWER_COVERAGE = 0.50
+MAX_ANSWER_PASSAGES = 4
 
-# Maximum number of evidence passages sent to Ollama.
-MAX_ANSWER_PASSAGES = 3
+# Comparison questions search more deeply than the visible
+# number of evidence cards.
+COMPARISON_SEARCH_K = 12
+
+LIBRARY_INDEX_DIR = Path("outputs") / "library_index"
 
 
 # ============================================================
-# QUERY / TEXT HELPERS
+# QUERY HELPERS
 # ============================================================
 
 def query_keywords(query: str) -> list[str]:
     generic = {
         "paper",
+        "papers",
         "study",
+        "studies",
         "article",
+        "articles",
         "described",
         "discussed",
         "explain",
@@ -45,6 +51,7 @@ def query_keywords(query: str) -> list[str]:
         "main",
         "according",
         "authors",
+        "author",
         "review",
         "research",
         "what",
@@ -58,6 +65,8 @@ def query_keywords(query: str) -> list[str]:
         "from",
         "into",
         "about",
+        "both",
+        "two",
     }
 
     return [
@@ -69,6 +78,38 @@ def query_keywords(query: str) -> list[str]:
         if (len(word) > 2 or word.isdigit())
         and word.lower() not in generic
     ]
+
+
+def is_cross_document_question(
+    query: str,
+) -> bool:
+    q_low = query.lower()
+
+    comparison_phrases = [
+        "compare",
+        "comparison",
+        "compared",
+        "difference",
+        "differences",
+        "different",
+        "differently",
+        "similar",
+        "similarity",
+        "similarities",
+        "both papers",
+        "two papers",
+        "across the papers",
+        "across papers",
+        "between the papers",
+        "between these papers",
+        "how do the papers",
+        "how do these papers",
+    ]
+
+    return any(
+        phrase in q_low
+        for phrase in comparison_phrases
+    )
 
 
 def split_sentences(text: str) -> list[str]:
@@ -99,7 +140,6 @@ def pick_snippet(
     query: str = "",
     max_len: int = 420,
 ) -> str:
-
     sentences = split_sentences(text)
 
     if not sentences:
@@ -119,7 +159,6 @@ def pick_snippet(
     best_score = float("-inf")
 
     for i, sentence in enumerate(sentences):
-
         if is_bad(sentence):
             continue
 
@@ -130,17 +169,10 @@ def pick_snippet(
             if keyword in low:
                 score += 1.0
 
-        # Intent-aware snippet bonuses.
-        if (
-            "stages" in q_low
-            and "stages" in low
-        ):
+        if "stages" in q_low and "stages" in low:
             score += 4.0
 
-        if (
-            "steps" in q_low
-            and "steps" in low
-        ):
+        if "steps" in q_low and "steps" in low:
             score += 4.0
 
         if (
@@ -161,6 +193,37 @@ def pick_snippet(
         ):
             score += 4.0
 
+        # For comparison questions, prefer sentences
+        # that describe what the paper actually does.
+        if is_cross_document_question(query):
+            representative_phrases = [
+                "our approach",
+                "our work",
+                "we develop",
+                "we propose",
+                "we use",
+                "we train",
+                "we apply",
+                "we evaluate",
+                "main components",
+                "main component",
+                "purpose",
+                "goal",
+                "machine learning",
+                "training",
+                "prediction",
+                "recognition",
+                "classification",
+                "privacy",
+                "differentially private",
+                "image processing",
+                "computer vision",
+            ]
+
+            for phrase in representative_phrases:
+                if phrase in low:
+                    score += 1.0
+
         if score > best_score:
             best_score = score
             best_index = i
@@ -169,10 +232,7 @@ def pick_snippet(
         sentences[best_index]
     ]
 
-    # Preserve useful numbered sequences for process questions.
-    if any(
-    word in q_low
-    for word in [
+    list_intents = [
         "stages",
         "steps",
         "phases",
@@ -187,15 +247,19 @@ def pick_snippet(
         "disadvantages",
         "challenge",
         "challenges",
+        "application",
+        "applications",
     ]
-):
+
+    if any(
+        word in q_low
+        for word in list_intents
+    ):
         j = best_index + 1
 
         while (
             j < len(sentences)
-            and len(
-                " ".join(chosen)
-            ) < max_len
+            and len(" ".join(chosen)) < max_len
         ):
             if (
                 re.match(
@@ -208,19 +272,16 @@ def pick_snippet(
                     sentences[j]
                 )
                 j += 1
-
             else:
                 break
 
-    snippet = (
-        " ".join(chosen)
-        .strip()
-    )
+    snippet = " ".join(
+        chosen
+    ).strip()
 
     if len(snippet) > max_len:
         snippet = (
-            snippet[:max_len]
-            .rstrip()
+            snippet[:max_len].rstrip()
             + "…"
         )
 
@@ -228,13 +289,12 @@ def pick_snippet(
 
 
 # ============================================================
-# WEEK 4: EVIDENCE PRESENTATION
+# EVIDENCE HELPERS
 # ============================================================
 
 def evidence_strength(
     coverage: float,
 ) -> str:
-
     if coverage >= 0.75:
         return "Strong"
 
@@ -248,7 +308,6 @@ def highlight_terms(
     text: str,
     terms: list[str],
 ) -> str:
-
     escaped = html.escape(text)
 
     unique_terms = sorted(
@@ -262,7 +321,6 @@ def highlight_terms(
     )
 
     for term in unique_terms:
-
         pattern = re.compile(
             rf"\b({re.escape(html.escape(term))})\b",
             re.IGNORECASE,
@@ -279,7 +337,6 @@ def highlight_terms(
 def overall_evidence_coverage(
     results: list[dict],
 ) -> float:
-
     if not results:
         return 0.0
 
@@ -297,7 +354,6 @@ def overall_evidence_coverage(
 def evidence_is_sufficient(
     results: list[dict],
 ) -> bool:
-
     return (
         overall_evidence_coverage(
             results
@@ -306,21 +362,10 @@ def evidence_is_sufficient(
     )
 
 
-# ============================================================
-# WEEK 4: SELECT EVIDENCE FOR ANSWER GENERATION
-# ============================================================
-
 def get_matched_query_terms(
     result: dict,
     keywords: list[str],
 ) -> set[str]:
-    """
-    Return important query terms covered by one evidence passage.
-
-    Uses the retriever's matched_terms when available and also
-    checks the passage text directly.
-    """
-
     matched = {
         str(term).lower()
         for term in result.get(
@@ -343,29 +388,266 @@ def get_matched_query_terms(
     return matched
 
 
+# ============================================================
+# REPRESENTATIVE PASSAGE SCORING
+# ============================================================
+
+def representative_passage_score(
+    result: dict,
+    query: str,
+) -> float:
+    """
+    Score how useful a passage is for explaining
+    what a paper actually does.
+
+    Used mainly for comparison questions.
+    """
+
+    text = str(
+        result.get(
+            "text",
+            "",
+        )
+    ).lower()
+
+    coverage = float(
+        result.get(
+            "coverage",
+            0.0,
+        )
+    )
+
+    rerank_score = float(
+        result.get(
+            "rerank_score",
+            0.0,
+        )
+    )
+
+    score = (
+        coverage * 4.0
+        + rerank_score * 0.20
+    )
+
+    strong_phrases = {
+        "our approach": 4.0,
+        "our work": 2.5,
+        "we develop": 3.0,
+        "we propose": 3.0,
+        "we introduce": 3.0,
+        "we present": 2.0,
+        "we use": 1.5,
+        "we apply": 1.5,
+        "we train": 2.0,
+        "we evaluate": 1.5,
+        "main components": 5.0,
+        "main component": 4.0,
+        "consists of": 2.0,
+        "purpose": 2.0,
+        "goal": 2.0,
+        "training": 1.5,
+        "differentially private": 2.5,
+        "machine learning": 1.5,
+        "computer vision": 1.5,
+        "image processing": 1.5,
+        "recognition": 1.0,
+        "prediction": 1.0,
+        "classification": 1.0,
+    }
+
+    for phrase, bonus in (
+        strong_phrases.items()
+    ):
+        if phrase in text:
+            score += bonus
+
+    # Penalize passages that look like related work,
+    # references or isolated benchmark commentary.
+    weak_phrases = {
+        "related work": 2.5,
+        "references": 3.0,
+        "bibliography": 3.0,
+        "serving as benchmarks": 1.5,
+        "focus of active work": 1.0,
+    }
+
+    for phrase, penalty in (
+        weak_phrases.items()
+    ):
+        if phrase in text:
+            score -= penalty
+
+    return score
+
+
+# ============================================================
+# CROSS-DOCUMENT EVIDENCE SELECTION
+# ============================================================
+
+def select_cross_document_evidence(
+    query: str,
+    results: list[dict],
+    max_passages: int = MAX_ANSWER_PASSAGES,
+) -> list[dict]:
+    if not results:
+        return []
+
+    grouped: dict[
+        str,
+        list[dict],
+    ] = {}
+
+    document_order: list[str] = []
+
+    for result in results:
+        document = str(
+            result.get(
+                "document",
+                "Unknown paper",
+            )
+        )
+
+        if document not in grouped:
+            grouped[
+                document
+            ] = []
+
+            document_order.append(
+                document
+            )
+
+        grouped[
+            document
+        ].append(
+            result
+        )
+
+    # Rank passages INSIDE each paper according to how
+    # representative they are of that paper's purpose/method.
+    for document in grouped:
+        grouped[
+            document
+        ].sort(
+            key=lambda item: (
+                representative_passage_score(
+                    item,
+                    query,
+                ),
+                float(
+                    item.get(
+                        "coverage",
+                        0.0,
+                    )
+                ),
+                float(
+                    item.get(
+                        "rerank_score",
+                        0.0,
+                    )
+                ),
+            ),
+            reverse=True,
+        )
+
+    selected: list[dict] = []
+
+    # First pass: guarantee the best representative
+    # passage from every retrieved paper.
+    for document in document_order:
+        candidates = grouped[
+            document
+        ]
+
+        if not candidates:
+            continue
+
+        selected.append(
+            candidates[0]
+        )
+
+        if (
+            len(selected)
+            >= max_passages
+        ):
+            return selected
+
+    # Second pass: one additional supporting passage
+    # from each paper where useful.
+    for document in document_order:
+        candidates = grouped[
+            document
+        ]
+
+        if len(candidates) < 2:
+            continue
+
+        for candidate in candidates[1:]:
+            coverage = float(
+                candidate.get(
+                    "coverage",
+                    0.0,
+                )
+            )
+
+            representative_score = (
+                representative_passage_score(
+                    candidate,
+                    query,
+                )
+            )
+
+            if (
+                coverage < 0.20
+                and representative_score < 2.0
+            ):
+                continue
+
+            selected.append(
+                candidate
+            )
+
+            break
+
+        if (
+            len(selected)
+            >= max_passages
+        ):
+            break
+
+    return selected[
+        :max_passages
+    ]
+
+
+# ============================================================
+# NORMAL ANSWER-EVIDENCE SELECTION
+# ============================================================
+
 def select_answer_evidence(
     query: str,
     results: list[dict],
     max_passages: int = MAX_ANSWER_PASSAGES,
 ) -> list[dict]:
-    """
-    Select focused evidence for answer generation.
-
-    For list-style questions whose answer may span multiple
-    passages, keep a few of the strongest results.
-
-    For ordinary questions, use the minimum evidence needed
-    to cover the important query terms.
-    """
-
     if not results:
         return []
 
-    keywords = query_keywords(query)
+    if is_cross_document_question(
+        query
+    ):
+        return (
+            select_cross_document_evidence(
+                query,
+                results,
+                max_passages=max_passages,
+            )
+        )
+
+    keywords = query_keywords(
+        query
+    )
+
     q_low = query.lower()
 
-    # Questions whose answers are commonly spread over
-    # multiple chunks/pages.
     multi_evidence_intents = [
         "weakness",
         "weaknesses",
@@ -391,16 +673,15 @@ def select_answer_evidence(
     ):
         selected = []
 
-        for result in results[:max_passages]:
-
-            # Keep the strongest result.
+        for result in results[
+            :max_passages
+        ]:
             if not selected:
-                selected.append(result)
+                selected.append(
+                    result
+                )
                 continue
 
-            # For supporting passages, allow weaker lexical
-            # coverage because they may continue an answer
-            # introduced in the top passage.
             coverage = float(
                 result.get(
                     "coverage",
@@ -409,21 +690,20 @@ def select_answer_evidence(
             )
 
             if coverage >= 0.20:
-                selected.append(result)
+                selected.append(
+                    result
+                )
 
         return selected
 
-    # --------------------------------------------------------
-    # Normal focused-answer behaviour
-    # --------------------------------------------------------
-
-    required_terms = set(keywords)
+    required_terms = set(
+        keywords
+    )
 
     selected: list[dict] = []
     covered_terms: set[str] = set()
 
     for result in results:
-
         coverage = float(
             result.get(
                 "coverage",
@@ -431,30 +711,42 @@ def select_answer_evidence(
             )
         )
 
-        if coverage < MIN_ANSWER_COVERAGE:
+        if (
+            coverage
+            < MIN_ANSWER_COVERAGE
+        ):
             continue
 
-        result_terms = get_matched_query_terms(
-            result,
-            keywords,
+        result_terms = (
+            get_matched_query_terms(
+                result,
+                keywords,
+            )
         )
 
         if not selected:
+            selected.append(
+                result
+            )
 
-            selected.append(result)
-            covered_terms.update(result_terms)
+            covered_terms.update(
+                result_terms
+            )
 
         else:
-
             new_terms = (
                 result_terms
                 - covered_terms
             )
 
             if new_terms:
+                selected.append(
+                    result
+                )
 
-                selected.append(result)
-                covered_terms.update(result_terms)
+                covered_terms.update(
+                    result_terms
+                )
 
         if (
             required_terms
@@ -464,16 +756,179 @@ def select_answer_evidence(
         ):
             break
 
-        if len(selected) >= max_passages:
+        if (
+            len(selected)
+            >= max_passages
+        ):
             break
 
     if not selected:
-        selected = [results[0]]
+        selected = [
+            results[0]
+        ]
 
     return selected
 
+
 # ============================================================
-# EXTRACTIVE FALLBACK ANSWER
+# DOCUMENT HELPERS
+# ============================================================
+
+def document_display_name(
+    document: str,
+) -> str:
+    return Path(
+        document
+    ).stem
+
+
+def find_pdf_path(
+    document: str,
+) -> str | None:
+    document_name = Path(
+        document
+    ).name
+
+    for path in (
+        st.session_state.get(
+            "pdf_paths",
+            [],
+        )
+        or []
+    ):
+        if (
+            Path(path).name
+            == document_name
+        ):
+            return str(path)
+
+    return None
+
+
+def citation_text(
+    document: str,
+    page: int,
+) -> str:
+    name = (
+        document_display_name(
+            document
+        )
+    )
+
+    return (
+        f"[{name}, p. {page}]"
+    )
+
+
+# ============================================================
+# EVIDENCE-ID CITATION SYSTEM
+# ============================================================
+
+def build_evidence_map(
+    results: list[dict],
+) -> dict[str, dict]:
+    evidence_map: dict[
+        str,
+        dict,
+    ] = {}
+
+    for index, result in enumerate(
+        results,
+        start=1,
+    ):
+        evidence_id = (
+            f"E{index}"
+        )
+
+        evidence_map[
+            evidence_id
+        ] = result
+
+    return evidence_map
+
+
+def replace_evidence_ids_with_citations(
+    answer: str,
+    evidence_map: dict[str, dict],
+) -> str:
+    def replacement(
+        match: re.Match,
+    ) -> str:
+        evidence_id = (
+            match.group(1)
+            .upper()
+        )
+
+        result = evidence_map.get(
+            evidence_id
+        )
+
+        if result is None:
+            return match.group(0)
+
+        document = str(
+            result.get(
+                "document",
+                "Unknown paper",
+            )
+        )
+
+        page = int(
+            result.get(
+                "page",
+                1,
+            )
+        )
+
+        return citation_text(
+            document,
+            page,
+        )
+
+    return re.sub(
+        r"\[(E\d+)\]",
+        replacement,
+        answer,
+        flags=re.IGNORECASE,
+    )
+
+
+def extract_evidence_ids(
+    answer: str,
+) -> list[str]:
+    return [
+        evidence_id.upper()
+        for evidence_id in re.findall(
+            r"\[(E\d+)\]",
+            answer,
+            flags=re.IGNORECASE,
+        )
+    ]
+
+
+def evidence_ids_are_valid(
+    answer: str,
+    evidence_map: dict[str, dict],
+) -> bool:
+    used_ids = extract_evidence_ids(
+        answer
+    )
+
+    if not used_ids:
+        return False
+
+    allowed_ids = set(
+        evidence_map.keys()
+    )
+
+    return all(
+        evidence_id in allowed_ids
+        for evidence_id in used_ids
+    )
+
+
+# ============================================================
+# EXTRACTIVE FALLBACK
 # ============================================================
 
 def make_extractive_answer(
@@ -481,9 +936,11 @@ def make_extractive_answer(
     results: list[dict],
     max_points: int = 6,
 ) -> str:
-
     if not results:
-        return "Not found in the paper."
+        return (
+            "Not found in the "
+            "provided evidence."
+        )
 
     keywords = query_keywords(
         query
@@ -492,23 +949,40 @@ def make_extractive_answer(
     points: list[str] = []
 
     seen: set[
-        tuple[int, str]
+        tuple[
+            str,
+            int,
+            str,
+        ]
     ] = set()
 
     for result in results:
-
         page = int(
-            result["page"]
+            result.get(
+                "page",
+                1,
+            )
+        )
+
+        document = str(
+            result.get(
+                "document",
+                "Unknown paper",
+            )
         )
 
         snippet = pick_snippet(
-            result["text"],
+            result.get(
+                "text",
+                "",
+            ),
             keywords,
             query=query,
             max_len=420,
         )
 
         key = (
+            document,
             page,
             snippet,
         )
@@ -520,8 +994,13 @@ def make_extractive_answer(
             key
         )
 
+        citation = citation_text(
+            document,
+            page,
+        )
+
         points.append(
-            f"- {snippet} **[p. {page}]**"
+            f"- {snippet} **{citation}**"
         )
 
         if (
@@ -531,7 +1010,10 @@ def make_extractive_answer(
             break
 
     if not points:
-        return "Not found in the paper."
+        return (
+            "Not found in the "
+            "provided evidence."
+        )
 
     return "\n".join(
         points
@@ -548,13 +1030,11 @@ def render_page_png(
     page_num: int,
     zoom: float = 1.8,
 ) -> bytes:
-
     doc = fitz.open(
         pdf_path
     )
 
     try:
-
         page = doc.load_page(
             page_num - 1
         )
@@ -578,51 +1058,107 @@ def render_page_png(
 
 def set_view_page(
     page: int,
+    document: str,
 ) -> None:
-
     st.session_state[
         "view_page"
     ] = int(page)
 
+    st.session_state[
+        "view_document"
+    ] = document
+
 
 # ============================================================
-# OLLAMA PROMPT
+# ANSWER PROMPT
 # ============================================================
 
 def build_answer_prompt(
     query: str,
     results: list[dict],
-) -> str:
+) -> tuple[
+    str,
+    dict[str, dict],
+]:
+    evidence_map = (
+        build_evidence_map(
+            results
+        )
+    )
 
-    evidence_blocks: list[str] = []
+    evidence_blocks: list[
+        str
+    ] = []
 
-    for result in results:
-
+    for evidence_id, result in (
+        evidence_map.items()
+    ):
         page = int(
-            result["page"]
+            result.get(
+                "page",
+                1,
+            )
+        )
+
+        document = str(
+            result.get(
+                "document",
+                "Unknown paper",
+            )
+        )
+
+        display_name = (
+            document_display_name(
+                document
+            )
         )
 
         text = pick_snippet(
-
-    result["text"],
-
-    query_keywords(query),
-
-    query=query,
-
-    max_len=900,
-
-)
+            result.get(
+                "text",
+                "",
+            ),
+            query_keywords(
+                query
+            ),
+            query=query,
+            max_len=900,
+        )
 
         evidence_blocks.append(
-            f"[p. {page}] {text}"
+            (
+                f"[{evidence_id}] "
+                f"Source: {display_name}, "
+                f"page {page}\n"
+                f"{text}"
+            )
         )
 
     evidence = "\n\n".join(
         evidence_blocks
     )
 
-    return f"""
+    comparison_instruction = ""
+
+    if is_cross_document_question(
+        query
+    ):
+        comparison_instruction = """
+This is a cross-document comparison question.
+
+COMPARISON RULES:
+
+- Identify what EACH paper is primarily doing with the topic in the question.
+- Compare those purposes or approaches directly.
+- Do not compare incidental mentions.
+- Prefer passages that explain a paper's method, purpose, approach, contribution, or application.
+- Use evidence from every relevant paper.
+- Clearly distinguish Paper A from Paper B.
+- Do not claim a difference unless the supplied evidence supports both sides.
+- Keep the comparison concise.
+"""
+
+    prompt = f"""
 You are Paper Copilot, a research-paper reading assistant.
 
 Answer the user's question using ONLY the supplied evidence.
@@ -631,7 +1167,7 @@ Do not use outside knowledge.
 Do not guess.
 Do not invent information.
 
-If the supplied evidence does not support a claim, do not include that claim.
+{comparison_instruction}
 
 QUESTION
 
@@ -646,81 +1182,29 @@ EVIDENCE
 ANSWER RULES
 
 1. Answer ONLY what the user explicitly asked.
-2. Do not add related, supplementary, background, or follow-up information.
-3. Ignore evidence that does not directly help answer the exact question.
+2. Use ONLY information supported by the supplied evidence.
+3. Do not add unrelated background information.
 4. Give the shortest complete answer supported by the evidence.
-5. Use bullets or a numbered list when the question asks for stages, steps, items, weaknesses, advantages, or other lists.
-6. Every factual bullet or factual statement must end with a page citation.
-7. Format citations exactly like:
-   [p. 2]
-   [p. 2, p. 4]
-8. Only cite pages present in the supplied evidence.
-9. Never invent a page number.
-10. Never cite outside sources.
-11. Do not repeat the question unless necessary.
-12. Do not add an "Additionally" section or discuss related concepts unless the user asks for them.
-13. If the evidence is insufficient, respond exactly:
+5. Use bullets when they improve clarity.
+6. Cite evidence using ONLY evidence IDs such as:
+   [E1]
+   [E2]
+7. Do NOT write paper names inside citations.
+8. Do NOT write page numbers inside citations.
+9. Do NOT invent evidence IDs.
+10. Only use evidence IDs present in the supplied evidence.
+11. Every factual bullet or factual statement must end with at least one evidence ID.
+12. If one statement needs multiple passages, use:
+    [E1] [E2]
+13. For comparison questions, support EACH side of the comparison with its own evidence.
+14. Do not add an "Additionally" section unless explicitly requested.
+15. If the evidence is insufficient, respond exactly:
     Not found in the provided evidence.
 """.strip()
 
-
-# ============================================================
-# CITATION VALIDATION
-# ============================================================
-
-def answer_has_citations(
-    answer: str,
-) -> bool:
-
-    return bool(
-        re.search(
-            r"\[p\.\s*\d+",
-            answer,
-            flags=re.IGNORECASE,
-        )
-    )
-
-
-def cited_pages(
-    answer: str,
-) -> set[int]:
-    """
-    Extract page numbers from citations such as:
-    [p. 2]
-    [p. 2, p. 4]
-    """
-
-    pages = re.findall(
-        r"p\.\s*(\d+)",
-        answer,
-        flags=re.IGNORECASE,
-    )
-
-    return {
-        int(page)
-        for page in pages
-    }
-
-
-def citations_are_valid(
-    answer: str,
-    evidence_results: list[dict],
-) -> bool:
-
-    allowed_pages = {
-        int(result["page"])
-        for result in evidence_results
-    }
-
-    used_pages = cited_pages(
-        answer
-    )
-
-    if not used_pages:
-        return False
-
-    return used_pages.issubset(
-        allowed_pages
+    return (
+        prompt,
+        evidence_map,
     )
 
 
@@ -739,8 +1223,8 @@ st.title(
 )
 
 st.caption(
-    "Ask questions about a research paper and verify "
-    "answers directly against page-level evidence."
+    "Ask questions across multiple research papers "
+    "and verify answers against page-level evidence."
 )
 
 
@@ -749,8 +1233,13 @@ st.caption(
 # ============================================================
 
 st.session_state.setdefault(
-    "pdf_path",
-    None,
+    "pdf_paths",
+    [],
+)
+
+st.session_state.setdefault(
+    "json_paths",
+    [],
 )
 
 st.session_state.setdefault(
@@ -763,6 +1252,12 @@ st.session_state.setdefault(
     [],
 )
 
+# Deep candidate pool used by comparison questions.
+st.session_state.setdefault(
+    "answer_candidates",
+    [],
+)
+
 st.session_state.setdefault(
     "answer",
     "",
@@ -770,6 +1265,11 @@ st.session_state.setdefault(
 
 st.session_state.setdefault(
     "view_page",
+    None,
+)
+
+st.session_state.setdefault(
+    "view_document",
     None,
 )
 
@@ -806,142 +1306,209 @@ outputs_dir.mkdir(
 
 
 # ============================================================
-# SIDEBAR PAGE PREVIEW
+# SIDEBAR
 # ============================================================
 
 with st.sidebar:
+    st.subheader(
+        "📚 Research library"
+    )
+
+    pdf_paths = (
+        st.session_state.get(
+            "pdf_paths",
+            [],
+        )
+        or []
+    )
+
+    if pdf_paths:
+        st.caption(
+            f"{len(pdf_paths)} "
+            f"{'paper' if len(pdf_paths) == 1 else 'papers'} "
+            "indexed"
+        )
+
+        for path in pdf_paths:
+            st.write(
+                f"• {Path(path).name}"
+            )
+
+    else:
+        st.info(
+            "Upload and process research papers "
+            "to create your library."
+        )
+
+    st.divider()
 
     st.subheader(
         "📖 Citation viewer"
     )
 
-    if (
+    view_page = (
         st.session_state.get(
-            "pdf_path"
-        )
-        and st.session_state.get(
             "view_page"
         )
+    )
+
+    view_document = (
+        st.session_state.get(
+            "view_document"
+        )
+    )
+
+    if (
+        view_page
+        and view_document
     ):
-
-        view_page = int(
-            st.session_state[
-                "view_page"
-            ]
+        pdf_path = find_pdf_path(
+            view_document
         )
 
-        st.caption(
-            f"Viewing cited page {view_page}"
-        )
-
-        try:
-
-            png = render_page_png(
-                st.session_state[
-                    "pdf_path"
-                ],
-                view_page,
+        if pdf_path:
+            st.caption(
+                f"{Path(view_document).name} · "
+                f"Page {view_page}"
             )
 
-            st.image(
-                png,
-                use_container_width=True,
-            )
+            try:
+                png = render_page_png(
+                    pdf_path,
+                    int(
+                        view_page
+                    ),
+                )
 
-        except Exception as exc:
+                st.image(
+                    png,
+                    use_container_width=True,
+                )
 
-            st.error(
-                f"Could not render page: {exc}"
+            except Exception as exc:
+                st.error(
+                    f"Could not render page: {exc}"
+                )
+
+        else:
+            st.warning(
+                "The source PDF could not "
+                "be located."
             )
 
         if st.button(
             "Close page preview",
             use_container_width=True,
         ):
-
             st.session_state[
                 "view_page"
+            ] = None
+
+            st.session_state[
+                "view_document"
             ] = None
 
             st.rerun()
 
     else:
-
         st.info(
-            "Select **View page** beside an evidence "
-            "passage to verify it against the PDF."
+            "Click “View page” on an evidence "
+            "card to inspect the original PDF."
         )
 
 
 # ============================================================
-# PDF UPLOAD
+# MULTI-PDF UPLOAD
 # ============================================================
 
-pdf_file = st.file_uploader(
-    "Upload a research paper",
+pdf_files = st.file_uploader(
+    "Upload research papers",
     type=["pdf"],
+    accept_multiple_files=True,
 )
 
-if pdf_file:
 
-    pdf_path = (
-        uploads_dir
-        / pdf_file.name
+if pdf_files:
+    st.markdown(
+        "**Selected papers:**"
     )
 
-    pdf_path.write_bytes(
-        pdf_file.getbuffer()
-    )
-
-    st.success(
-        f"Loaded: {pdf_path.name}"
-    )
+    for pdf_file in pdf_files:
+        st.write(
+            f"• {pdf_file.name}"
+        )
 
     if st.button(
-        "Process / re-index PDF"
+        "Process / re-index library",
+        type="primary",
     ):
+        saved_pdf_paths: list[
+            str
+        ] = []
+
+        json_paths: list[
+            str
+        ] = []
 
         with st.spinner(
-            "Extracting text and rebuilding "
-            "the retrieval index..."
+            "Extracting papers and building "
+            "the combined research index..."
         ):
+            for pdf_file in pdf_files:
+                pdf_path = (
+                    uploads_dir
+                    / pdf_file.name
+                )
 
-            json_path = (
-                outputs_dir
-                / f"{pdf_path.stem}.json"
-            )
+                pdf_path.write_bytes(
+                    pdf_file.getbuffer()
+                )
 
-            ingest_pdf(
-                pdf_path,
-                json_path,
-                chunk_chars=1200,
-                overlap=200,
-            )
+                json_path = (
+                    outputs_dir
+                    / f"{pdf_path.stem}.json"
+                )
 
-            idx_dir = (
-                outputs_dir
-                / pdf_path.stem
-            )
+                ingest_pdf(
+                    pdf_path,
+                    json_path,
+                    chunk_chars=1200,
+                    overlap=200,
+                )
+
+                saved_pdf_paths.append(
+                    str(pdf_path)
+                )
+
+                json_paths.append(
+                    str(json_path)
+                )
 
             build_index(
-                json_path,
-                idx_dir,
+                json_paths,
+                LIBRARY_INDEX_DIR,
             )
 
         st.session_state[
-            "pdf_path"
-        ] = str(
-            pdf_path
-        )
+            "pdf_paths"
+        ] = saved_pdf_paths
+
+        st.session_state[
+            "json_paths"
+        ] = json_paths
 
         st.session_state[
             "idx_dir"
         ] = str(
-            idx_dir
+            LIBRARY_INDEX_DIR
         )
 
         st.session_state[
             "results"
+        ] = []
+
+        st.session_state[
+            "answer_candidates"
         ] = []
 
         st.session_state[
@@ -953,6 +1520,10 @@ if pdf_file:
         ] = None
 
         st.session_state[
+            "view_document"
+        ] = None
+
+        st.session_state[
             "last_query"
         ] = ""
 
@@ -961,66 +1532,207 @@ if pdf_file:
         ] = 0
 
         st.success(
-            "Processed and indexed."
+            f"Indexed {len(saved_pdf_paths)} "
+            f"{'paper' if len(saved_pdf_paths) == 1 else 'papers'} "
+            "into the research library."
         )
+
+        st.rerun()
+
+
+# ============================================================
+# LIBRARY STATUS
+# ============================================================
+
+idx_dir = (
+    st.session_state.get(
+        "idx_dir"
+    )
+)
+
+if not idx_dir:
+    st.info(
+        "Upload one or more PDFs and click "
+        "“Process / re-index library” to begin."
+    )
+
+    st.stop()
+
+
+st.success(
+    f"Research library ready — "
+    f"{len(st.session_state['pdf_paths'])} "
+    f"{'paper' if len(st.session_state['pdf_paths']) == 1 else 'papers'} "
+    "indexed."
+)
 
 
 # ============================================================
 # QUESTION
 # ============================================================
 
+st.divider()
+
 query = st.text_input(
-    "Ask a question",
-    value=st.session_state.get(
-        "last_query",
-        "",
-    ),
+    "Ask a question about your research library",
     placeholder=(
-        "e.g. What are the main stages "
-        "of image analysis?"
+        "Example: How do the two papers "
+        "use machine learning differently?"
     ),
 )
 
 
-k = st.slider(
-    "Evidence passages",
-    min_value=3,
-    max_value=10,
-    value=5,
+# ============================================================
+# SETTINGS
+# ============================================================
+
+col1, col2 = st.columns(
+    [
+        1,
+        2,
+    ]
 )
 
-
-with st.expander(
-    "Advanced settings"
-):
-
-    model = st.text_input(
-        "Ollama model",
-        value="llama3.1:8b",
+with col1:
+    k = st.slider(
+        "Evidence passages",
+        min_value=3,
+        max_value=10,
+        value=5,
     )
 
 
-# ============================================================
-# RESET RESULTS WHEN QUESTION CHANGES
-# ============================================================
-
-if (
-    query
-    != st.session_state.get(
-        "last_query"
-    )
-    or int(k)
-    != int(
-        st.session_state.get(
-            "last_k"
+with col2:
+    with st.expander(
+        "Advanced settings"
+    ):
+        ollama_model = (
+            st.text_input(
+                "Ollama model",
+                value="llama3.1:8b",
+            )
         )
-        or 0
-    )
-):
 
+
+# ============================================================
+# BUTTONS
+# ============================================================
+
+button_col1, button_col2, button_col3 = (
+    st.columns(3)
+)
+
+with button_col1:
+    search_clicked = (
+        st.button(
+            "🔎 Search evidence",
+            use_container_width=True,
+        )
+    )
+
+
+with button_col2:
+    answer_clicked = (
+        st.button(
+            "✨ Generate answer",
+            use_container_width=True,
+        )
+    )
+
+
+with button_col3:
+    clear_clicked = (
+        st.button(
+            "Clear",
+            use_container_width=True,
+        )
+    )
+
+
+# ============================================================
+# CLEAR
+# ============================================================
+
+if clear_clicked:
     st.session_state[
         "results"
     ] = []
+
+    st.session_state[
+        "answer_candidates"
+    ] = []
+
+    st.session_state[
+        "answer"
+    ] = ""
+
+    st.session_state[
+        "view_page"
+    ] = None
+
+    st.session_state[
+        "view_document"
+    ] = None
+
+    st.session_state[
+        "last_query"
+    ] = ""
+
+    st.rerun()
+
+
+# ============================================================
+# SEARCH
+# ============================================================
+
+def run_search() -> list[dict]:
+    if not query.strip():
+        st.warning(
+            "Enter a question first."
+        )
+
+        return []
+
+    comparison = (
+        is_cross_document_question(
+            query
+        )
+    )
+
+    internal_k = (
+        max(
+            int(k),
+            COMPARISON_SEARCH_K,
+        )
+        if comparison
+        else int(k)
+    )
+
+    all_results = search(
+        idx_dir,
+        query,
+        k=internal_k,
+        min_score=0.0,
+        candidate_multiplier=8,
+        duplicate_threshold=0.82,
+        max_per_page=2,
+    )
+
+    # Only the number chosen in the UI is displayed.
+    visible_results = (
+        all_results[
+            :int(k)
+        ]
+    )
+
+    st.session_state[
+        "results"
+    ] = visible_results
+
+    # Answer generation can use the deeper pool.
+    st.session_state[
+        "answer_candidates"
+    ] = all_results
 
     st.session_state[
         "answer"
@@ -1034,265 +1746,170 @@ if (
         "last_k"
     ] = int(k)
 
-
-# ============================================================
-# BUTTONS
-# ============================================================
-
-col_a, col_b, col_c = st.columns(
-    [1, 1, 1]
-)
-
-with col_a:
-
-    do_search = st.button(
-        "🔎 Search evidence",
-        use_container_width=True,
-    )
-
-with col_b:
-
-    do_answer = st.button(
-        "✨ Generate answer",
-        use_container_width=True,
-    )
-
-with col_c:
-
-    clear_results = st.button(
-        "Clear",
-        use_container_width=True,
-    )
+    return visible_results
 
 
-if clear_results:
-
-    st.session_state[
-        "results"
-    ] = []
-
-    st.session_state[
-        "answer"
-    ] = ""
-
-    st.session_state[
-        "view_page"
-    ] = None
-
-    st.rerun()
-
-
-idx_dir = st.session_state.get(
-    "idx_dir"
-)
-
-
-# ============================================================
-# SEARCH
-# ============================================================
-
-def run_search() -> bool:
-
-    if not idx_dir:
-
-        st.error(
-            "Upload a PDF and click "
-            "Process / re-index PDF first."
-        )
-
-        return False
-
-    if not query.strip():
-
-        st.warning(
-            "Type a question first."
-        )
-
-        return False
-
-    try:
-
-        results = search(
-            idx_dir,
-            query,
-            k=int(k),
-            min_score=0.0,
-            candidate_multiplier=8,
-            duplicate_threshold=0.82,
-            max_per_page=2,
-        )
-
-    except FileNotFoundError:
-
-        st.error(
-            "The index could not be found. "
-            "Please process the PDF again."
-        )
-
-        return False
-
-    except Exception as exc:
-
-        st.error(
-            f"Search failed: {exc}"
-        )
-
-        return False
-
-    st.session_state[
-        "results"
-    ] = results
-
-    if not results:
-
-        st.info(
-            "No useful evidence was found. "
-            "Try different wording or a "
-            "more specific question."
-        )
-
-        return False
-
-    return True
-
-
-if do_search:
+if search_clicked:
     run_search()
 
 
 # ============================================================
-# ANSWER GENERATION
+# GENERATE ANSWER
 # ============================================================
 
-if do_answer:
-
-    if not st.session_state.get(
-        "results"
-    ):
-        run_search()
-
-    results = (
-        st.session_state.get(
-            "results"
+if answer_clicked:
+    if not query.strip():
+        st.warning(
+            "Enter a question first."
         )
-        or []
-    )
 
-    if results:
-
-        coverage = (
-            overall_evidence_coverage(
-                results
+    else:
+        results = (
+            st.session_state.get(
+                "results",
+                [],
             )
+            or []
         )
 
-        # Do not send weak evidence to the LLM.
-        if not evidence_is_sufficient(
-            results
+        search_is_current = (
+            st.session_state.get(
+                "last_query"
+            )
+            == query
+            and st.session_state.get(
+                "last_k"
+            )
+            == int(k)
+        )
+
+        if (
+            not results
+            or not search_is_current
         ):
+            results = run_search()
 
-            st.session_state[
-                "answer"
-            ] = ""
-
-            st.warning(
-                "I found related passages, but the "
-                f"best evidence covers only "
-                f"{coverage:.0%} of the important "
-                "query terms. Paper Copilot will "
-                "not generate an answer from weak "
-                "evidence."
-            )
-
-        else:
-
-            # WEEK 4:
-            # Keep all results visible to the user,
-            # but send only the minimum necessary
-            # evidence to Ollama.
-            answer_results = (
-                select_answer_evidence(
-                    query,
-                    results,
+        if results:
+            candidates = (
+                st.session_state.get(
+                    "answer_candidates",
+                    [],
                 )
+                or results
             )
 
-            prompt = build_answer_prompt(
-                query,
-                answer_results,
-            )
-
-            with st.spinner(
-                "Generating a grounded answer..."
+            if not evidence_is_sufficient(
+                results
             ):
-
-                answer = ollama_chat(
-                    prompt,
-                    model=model,
-                )
-
-            if answer.startswith(
-                "Could not connect to Ollama"
-            ):
-
                 st.session_state[
                     "answer"
                 ] = ""
 
-                st.error(
-                    answer
-                )
-
-            elif (
-                answer.startswith(
-                    "Ollama error"
-                )
-                or answer.startswith(
-                    "Ollama timed out"
-                )
-            ):
-
-                st.session_state[
-                    "answer"
-                ] = ""
-
-                st.error(
-                    answer
+                st.warning(
+                    "The retrieved evidence is too weak "
+                    "to support a reliable answer."
                 )
 
             else:
-
-                # Citation safeguard:
-                # the model must include citations
-                # and may cite only evidence pages
-                # actually supplied to it.
-                if (
-                    not answer_has_citations(
-                        answer
+                answer_results = (
+                    select_answer_evidence(
+                        query,
+                        candidates,
                     )
-                    or not citations_are_valid(
-                        answer,
+                )
+
+                prompt, evidence_map = (
+                    build_answer_prompt(
+                        query,
                         answer_results,
                     )
+                )
+
+                with st.spinner(
+                    "Generating a grounded answer..."
                 ):
-
-                    st.warning(
-                        "The model produced missing or "
-                        "invalid page citations. Showing "
-                        "a citation-safe extractive answer "
-                        "instead."
-                    )
-
-                    answer = (
-                        make_extractive_answer(
-                            query,
-                            answer_results,
+                    try:
+                        raw_answer = (
+                            ollama_chat(
+                                prompt,
+                                model=ollama_model,
+                            )
                         )
+
+                    except Exception as exc:
+                        st.error(
+                            f"Ollama error: {exc}"
+                        )
+
+                        raw_answer = ""
+
+                if raw_answer:
+                    normalized_answer = (
+                        raw_answer.strip()
                     )
 
-                st.session_state[
-                    "answer"
-                ] = answer
+                    if (
+                        normalized_answer
+                        == "Not found in the provided evidence."
+                    ):
+                        st.session_state[
+                            "answer"
+                        ] = normalized_answer
+
+                    elif evidence_ids_are_valid(
+                        normalized_answer,
+                        evidence_map,
+                    ):
+                        final_answer = (
+                            replace_evidence_ids_with_citations(
+                                normalized_answer,
+                                evidence_map,
+                            )
+                        )
+
+                        st.session_state[
+                            "answer"
+                        ] = final_answer
+
+                    else:
+                        st.warning(
+                            "The generated answer used missing "
+                            "or invalid evidence references, so "
+                            "Paper Copilot created a citation-safe "
+                            "answer instead."
+                        )
+
+                        st.session_state[
+                            "answer"
+                        ] = (
+                            make_extractive_answer(
+                                query,
+                                answer_results,
+                            )
+                        )
+
+
+# ============================================================
+# ANSWER DISPLAY
+# ============================================================
+
+answer = (
+    st.session_state.get(
+        "answer",
+        "",
+    )
+)
+
+if answer:
+    st.divider()
+
+    st.subheader(
+        "Answer"
+    )
+
+    st.markdown(
+        answer
+    )
 
 
 # ============================================================
@@ -1301,62 +1918,108 @@ if do_answer:
 
 results = (
     st.session_state.get(
-        "results"
+        "results",
+        [],
     )
     or []
 )
 
 if results:
-
     st.divider()
 
     st.subheader(
-        f"Evidence · {len(results)} passages"
+        "Evidence"
     )
 
-    best_coverage = (
+    max_coverage = (
         overall_evidence_coverage(
             results
         )
     )
 
-    if evidence_is_sufficient(
-        results
+    if (
+        max_coverage
+        < MIN_ANSWER_COVERAGE
     ):
-
-        st.success(
-            f"{evidence_strength(best_coverage)} "
-            f"evidence match · "
-            f"{best_coverage:.0%} query coverage"
+        st.warning(
+            "Insufficient evidence: the best retrieved "
+            f"passage covers only "
+            f"{max_coverage:.0%} of the important "
+            "query terms."
         )
 
     else:
-
-        st.warning(
-            "Insufficient evidence · "
-            f"best passage covers "
-            f"{best_coverage:.0%} of the "
-            "important query terms."
+        st.caption(
+            f"Best query coverage: "
+            f"{max_coverage:.0%}"
         )
 
+    if is_cross_document_question(
+        st.session_state.get(
+            "last_query",
+            query,
+        )
+    ):
+        answer_candidates = (
+            st.session_state.get(
+                "answer_candidates",
+                [],
+            )
+            or results
+        )
+
+        retrieved_documents = {
+            str(
+                result.get(
+                    "document",
+                    "",
+                )
+            )
+            for result in answer_candidates
+        }
+
+        if (
+            len(retrieved_documents)
+            >= 2
+        ):
+            st.caption(
+                "Cross-paper question detected — "
+                f"comparison evidence found across "
+                f"{len(retrieved_documents)} papers."
+            )
+
     keywords = query_keywords(
-        query
+        st.session_state.get(
+            "last_query",
+            query,
+        )
     )
 
     for result in results:
+        rank = int(
+            result.get(
+                "rank",
+                0,
+            )
+        )
+
+        document = str(
+            result.get(
+                "document",
+                "Unknown paper",
+            )
+        )
+
+        document_name = (
+            document_display_name(
+                document
+            )
+        )
 
         page = int(
-            result["page"]
-        )
-
-        bm25_score = float(
-            result["score"]
-        )
-
-        rerank_score = float(
             result.get(
-                "rerank_score",
-                bm25_score,
+                "page",
+                1,
             )
         )
 
@@ -1367,179 +2030,177 @@ if results:
             )
         )
 
-        matched_terms = (
-            result.get(
-                "matched_terms",
-                [],
-            )
-        )
-
-        intent_bonus = float(
-            result.get(
-                "intent_bonus",
-                0.0,
-            )
-        )
-
-        noise_penalty = float(
-            result.get(
-                "noise_penalty",
-                0.0,
-            )
-        )
-
-        # ----------------------------
-        # Evidence card heading
-        # ----------------------------
-
-        st.markdown(
-            f"### Evidence {result['rank']} "
-            f"· Page {page}"
-        )
-
         strength = (
             evidence_strength(
                 coverage
             )
         )
 
-        st.caption(
-            f"{strength} match · "
-            f"{coverage:.0%} query coverage"
-        )
-
         snippet = pick_snippet(
-            result["text"],
+            result.get(
+                "text",
+                "",
+            ),
             keywords,
-            query=query,
-            max_len=420,
+            query=st.session_state.get(
+                "last_query",
+                query,
+            ),
+            max_len=520,
         )
 
         highlighted = (
             highlight_terms(
                 snippet,
-                matched_terms,
+                keywords,
             )
         )
+
+        st.markdown(
+            f"### #{rank} · "
+            f"{document_name} · "
+            f"Page {page}"
+        )
+
+        meta_col1, meta_col2, meta_col3 = (
+            st.columns(
+                [
+                    1,
+                    1,
+                    1,
+                ]
+            )
+        )
+
+        with meta_col1:
+            st.metric(
+                "Evidence",
+                strength,
+            )
+
+        with meta_col2:
+            st.metric(
+                "Query coverage",
+                f"{coverage:.0%}",
+            )
+
+        with meta_col3:
+            if st.button(
+                "View page",
+                key=(
+                    f"view_"
+                    f"{rank}_"
+                    f"{document_name}_"
+                    f"{page}"
+                ),
+                use_container_width=True,
+            ):
+                set_view_page(
+                    page,
+                    document,
+                )
+
+                st.rerun()
 
         st.markdown(
             highlighted,
             unsafe_allow_html=True,
         )
 
-        # ----------------------------
-        # Citation / page verification
-        # ----------------------------
-
-        left, right = st.columns(
-            [1, 5]
+        st.caption(
+            "Citation: "
+            + citation_text(
+                document,
+                page,
+            )
         )
 
-        with left:
-
-            st.button(
-                f"📖 View page {page}",
-                key=(
-                    f"view_"
-                    f"{result['rank']}_"
-                    f"{page}_"
-                    f"{result.get('chunk_id', '')}"
-                ),
-                on_click=set_view_page,
-                args=(page,),
-                use_container_width=True,
-            )
-
-        with right:
-
-            st.markdown(
-                f"**Citation:** `[p. {page}]`"
-            )
-
-        # ----------------------------
-        # Full evidence
-        # ----------------------------
-
         with st.expander(
-            "Show full evidence passage"
+            "Full evidence passage"
         ):
-
             st.write(
-                result["text"]
+                result.get(
+                    "text",
+                    "",
+                )
             )
-
-        # ----------------------------
-        # Technical retrieval details
-        # ----------------------------
 
         with st.expander(
             "Retrieval details"
         ):
-
             st.write(
-                f"BM25 score: "
-                f"{bm25_score:.3f}"
+                "Document:",
+                document,
             )
 
             st.write(
-                f"Final rerank score: "
-                f"{rerank_score:.3f}"
+                "Page:",
+                page,
             )
 
             st.write(
-                f"Query coverage: "
-                f"{coverage:.0%}"
+                "BM25 score:",
+                round(
+                    float(
+                        result.get(
+                            "score",
+                            0.0,
+                        )
+                    ),
+                    3,
+                ),
             )
 
-            if matched_terms:
+            st.write(
+                "Final rank score:",
+                round(
+                    float(
+                        result.get(
+                            "rerank_score",
+                            0.0,
+                        )
+                    ),
+                    3,
+                ),
+            )
 
-                st.write(
-                    "Matched terms: "
-                    + ", ".join(
-                        matched_terms
-                    )
-                )
+            st.write(
+                "Query coverage:",
+                f"{coverage:.1%}",
+            )
 
-            if intent_bonus > 0:
+            st.write(
+                "Matched query terms:",
+                result.get(
+                    "matched_terms",
+                    [],
+                ),
+            )
 
-                st.write(
-                    f"Intent bonus: "
-                    f"+{intent_bonus:.1f}"
-                )
+            st.write(
+                "Intent bonus:",
+                round(
+                    float(
+                        result.get(
+                            "intent_bonus",
+                            0.0,
+                        )
+                    ),
+                    3,
+                ),
+            )
 
-            if noise_penalty > 0:
-
-                st.write(
-                    f"Noise penalty: "
-                    f"-{noise_penalty:.1f}"
-                )
+            st.write(
+                "Noise penalty:",
+                round(
+                    float(
+                        result.get(
+                            "noise_penalty",
+                            0.0,
+                        )
+                    ),
+                    3,
+                ),
+            )
 
         st.divider()
-
-
-# ============================================================
-# ANSWER DISPLAY
-# ============================================================
-
-answer = (
-    st.session_state.get(
-        "answer"
-    )
-    or ""
-)
-
-if answer:
-
-    st.subheader(
-        "Answer"
-    )
-
-    st.markdown(
-        answer
-    )
-
-    st.caption(
-        "Answers are generated only from the "
-        "retrieved passages above. Verify claims "
-        "using the cited PDF pages."
-    )
