@@ -6,8 +6,14 @@ import fitz
 import streamlit as st
 
 from src.ingest import ingest_pdf
-from src.index import build_index, search
+from src.index import build_index, search, semantic_search, hybrid_search
+from src.evidence import (
+    evidence_is_sufficient as retrieval_is_sufficient,
+    passage_is_relevant, supported_passages, methodology_answer_is_complete,
+)
 from src.llm import ollama_chat
+from src.citations import citations_are_complete, normalize_answer
+from src.index import is_methodology_question, methodology_score
 
 
 # ============================================================
@@ -27,7 +33,7 @@ MAX_ANSWER_PASSAGES = 4
 
 # Comparison questions search more deeply than the visible
 # number of evidence cards.
-COMPARISON_SEARCH_K = 12
+COMPARISON_SEARCH_K = 20
 
 LIBRARY_INDEX_DIR = Path("outputs") / "library_index"
 
@@ -351,14 +357,9 @@ def overall_evidence_coverage(
     )
 
 
-def evidence_is_sufficient(
-    results: list[dict],
-) -> bool:
-    return (
-        overall_evidence_coverage(
-            results
-        )
-        >= MIN_ANSWER_COVERAGE
+def evidence_is_sufficient(results: list[dict], question: str = "") -> bool:
+    return retrieval_is_sufficient(
+        question, results, comparison=is_cross_document_question(question),
     )
 
 
@@ -430,6 +431,8 @@ def representative_passage_score(
     )
 
     strong_phrases = {
+        "in this paper": 6.0,
+        "we combine": 6.0,
         "our approach": 4.0,
         "our work": 2.5,
         "we develop": 3.0,
@@ -631,6 +634,10 @@ def select_answer_evidence(
     if not results:
         return []
 
+    results = supported_passages(query, results)
+    if not results:
+        return []
+
     if is_cross_document_question(
         query
     ):
@@ -641,6 +648,19 @@ def select_answer_evidence(
                 max_passages=max_passages,
             )
         )
+
+    definition = re.match(r"what is (.+?)(?: and |\?|$)", query.strip(), re.I)
+    if definition:
+        subject = re.escape(definition.group(1))
+        direct = [r for r in results if re.search(subject + r"\s+(?:is|as|refers|means)\b", r["text"], re.I)]
+        if direct:
+            return direct[:max_passages]
+
+    if is_methodology_question(query):
+        procedures = [r for r in results if methodology_score(r["text"]) >= 2]
+        if procedures:
+            return sorted(procedures, key=lambda r: methodology_score(r["text"]), reverse=True)[:max_passages]
+        return results[:max_passages]
 
     keywords = query_keywords(
         query
@@ -711,10 +731,7 @@ def select_answer_evidence(
             )
         )
 
-        if (
-            coverage
-            < MIN_ANSWER_COVERAGE
-        ):
+        if not passage_is_relevant(result):
             continue
 
         result_terms = (
@@ -921,7 +938,7 @@ def evidence_ids_are_valid(
         evidence_map.keys()
     )
 
-    return all(
+    return citations_are_complete(answer) and all(
         evidence_id in allowed_ids
         for evidence_id in used_ids
     )
@@ -971,15 +988,10 @@ def make_extractive_answer(
             )
         )
 
-        snippet = pick_snippet(
-            result.get(
-                "text",
-                "",
-            ),
-            keywords,
-            query=query,
-            max_len=420,
-        )
+        if is_methodology_question(query) and not is_cross_document_question(query):
+            snippet = " ".join(re.split(r"(?<=[.!?])\s+", result.get("text", ""))[:3])
+        else:
+            snippet = pick_snippet(result.get("text", ""), keywords, query=query, max_len=1400)
 
         key = (
             document,
@@ -999,9 +1011,8 @@ def make_extractive_answer(
             page,
         )
 
-        points.append(
-            f"- {snippet} **{citation}**"
-        )
+        sentences = re.split(r"(?<=[.!?])\s+", snippet)
+        points.append("- " + " ".join(f"{sentence} **{citation}**" for sentence in sentences))
 
         if (
             len(points)
@@ -1113,17 +1124,9 @@ def build_answer_prompt(
             )
         )
 
-        text = pick_snippet(
-            result.get(
-                "text",
-                "",
-            ),
-            query_keywords(
-                query
-            ),
-            query=query,
-            max_len=900,
-        )
+        # Keep complete page-bounded chunks: lexical snippets can omit the
+        # procedural details that made semantic evidence useful.
+        text = result.get("text", "").strip()
 
         evidence_blocks.append(
             (
@@ -1198,7 +1201,9 @@ ANSWER RULES
     [E1] [E2]
 13. For comparison questions, support EACH side of the comparison with its own evidence.
 14. Do not add an "Additionally" section unless explicitly requested.
-15. If the evidence is insufficient, respond exactly:
+15. Write only cited answer sentences or cited bullets. Omit headings, introductions, repeated questions, and uncited conclusions.
+16. For how/method questions, explain the concrete procedure in the evidence, not just its feasibility. When an algorithm is supplied, include its distinct operations in order, including intermediate transformations, aggregation, updates, and any accounting step; do not collapse them into a vague summary.
+17. If the evidence is insufficient, respond exactly:
     Not found in the provided evidence.
 """.strip()
 
@@ -1606,6 +1611,10 @@ with col2:
     with st.expander(
         "Advanced settings"
     ):
+        retrieval_mode = st.selectbox(
+            "Retrieval mode", ["Hybrid", "BM25", "Semantic"],
+        )
+
         ollama_model = (
             st.text_input(
                 "Ollama model",
@@ -1693,30 +1702,23 @@ def run_search() -> list[dict]:
 
         return []
 
-    comparison = (
-        is_cross_document_question(
-            query
-        )
-    )
+    internal_k = max(int(k), COMPARISON_SEARCH_K)
 
-    internal_k = (
-        max(
-            int(k),
-            COMPARISON_SEARCH_K,
-        )
-        if comparison
-        else int(k)
-    )
+    method = {"BM25": search, "Semantic": semantic_search, "Hybrid": hybrid_search}[retrieval_mode]
+    try:
+        with st.spinner("Searching the research library..."):
+            all_results = method(
+                idx_dir, query, k=internal_k, min_score=0.0,
+                candidate_multiplier=8, duplicate_threshold=0.82, max_per_page=2,
+            )
+    except (OSError, ValueError, ImportError) as exc:
+        st.session_state["results"] = []
+        st.session_state["answer_candidates"] = []
+        st.session_state["answer"] = ""
+        st.error(f"Search failed: {exc}. Re-index the library or select BM25.")
+        return []
 
-    all_results = search(
-        idx_dir,
-        query,
-        k=internal_k,
-        min_score=0.0,
-        candidate_multiplier=8,
-        duplicate_threshold=0.82,
-        max_per_page=2,
-    )
+    st.session_state["last_retrieval_mode"] = retrieval_mode
 
     # Only the number chosen in the UI is displayed.
     visible_results = (
@@ -1781,6 +1783,7 @@ if answer_clicked:
                 "last_k"
             )
             == int(k)
+            and st.session_state.get("last_retrieval_mode") == retrieval_mode
         )
 
         if (
@@ -1798,9 +1801,7 @@ if answer_clicked:
                 or results
             )
 
-            if not evidence_is_sufficient(
-                results
-            ):
+            if not evidence_is_sufficient(candidates, query):
                 st.session_state[
                     "answer"
                 ] = ""
@@ -1845,7 +1846,7 @@ if answer_clicked:
 
                 if raw_answer:
                     normalized_answer = (
-                        raw_answer.strip()
+                        normalize_answer(raw_answer, query)
                     )
 
                     if (
@@ -1859,7 +1860,9 @@ if answer_clicked:
                     elif evidence_ids_are_valid(
                         normalized_answer,
                         evidence_map,
-                    ):
+                    ) and (not is_methodology_question(query)
+                           or is_cross_document_question(query)
+                           or methodology_answer_is_complete(normalized_answer, answer_results)):
                         final_answer = (
                             replace_evidence_ids_with_citations(
                                 normalized_answer,
@@ -1874,7 +1877,7 @@ if answer_clicked:
                     else:
                         st.warning(
                             "The generated answer used missing "
-                            "or invalid evidence references, so "
+                            "or invalid citations, uncited text, or omitted algorithm steps, so "
                             "Paper Copilot created a citation-safe "
                             "answer instead."
                         )
@@ -1937,22 +1940,12 @@ if results:
         )
     )
 
-    if (
-        max_coverage
-        < MIN_ANSWER_COVERAGE
+    if not evidence_is_sufficient(
+        st.session_state.get("answer_candidates") or results,
+        st.session_state.get("last_query", query),
     ):
-        st.warning(
-            "Insufficient evidence: the best retrieved "
-            f"passage covers only "
-            f"{max_coverage:.0%} of the important "
-            "query terms."
-        )
-
-    else:
-        st.caption(
-            f"Best query coverage: "
-            f"{max_coverage:.0%}"
-        )
+        st.warning("The retrieved evidence is too weak or lacks the requested entities to support an answer.")
+    st.caption(f"Best lexical query coverage: {max_coverage:.0%}")
 
     if is_cross_document_question(
         st.session_state.get(
@@ -2074,7 +2067,7 @@ if results:
 
         with meta_col1:
             st.metric(
-                "Evidence",
+                "Lexical match",
                 strength,
             )
 
@@ -2128,6 +2121,13 @@ if results:
         with st.expander(
             "Retrieval details"
         ):
+            st.write("Method:", result.get("retrieval_method", "bm25"))
+            if "semantic_score" in result:
+                st.write("Semantic similarity:", round(result["semantic_score"], 3))
+            if "rrf_score" in result:
+                st.write("Fusion score:", round(result["rrf_score"], 5))
+                st.write("BM25 / semantic ranks:", result["bm25_rank"], result["semantic_rank"])
+
             st.write(
                 "Document:",
                 document,
@@ -2143,8 +2143,8 @@ if results:
                 round(
                     float(
                         result.get(
-                            "score",
-                            0.0,
+                            "bm25_score",
+                            result.get("score", 0.0) if result.get("retrieval_method") == "bm25" else 0.0,
                         )
                     ),
                     3,

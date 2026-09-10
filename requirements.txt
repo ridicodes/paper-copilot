@@ -3,3 +3,4 @@ pymupdf
 rank-bm25
 numpy
 requests
+sentence-transformers

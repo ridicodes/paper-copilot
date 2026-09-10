@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from collections import Counter
+from functools import lru_cache
+
+import numpy as np
 from pathlib import Path
 from typing import Any
 import json
@@ -12,8 +15,12 @@ from rank_bm25 import BM25Okapi
 
 
 # ============================================================
-# WEEK 5 CONFIGURATION
+# RETRIEVAL CONFIGURATION
 # ============================================================
+
+EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
+INDEX_VERSION = 6
+
 
 STOPWORDS = {
     "a",
@@ -422,6 +429,8 @@ def build_index(
         exist_ok=True,
     )
 
+    embeddings = build_embeddings([chunk["text"] for chunk in all_chunks])
+
     # --------------------------------------------------------
     # Store BM25 object
     # --------------------------------------------------------
@@ -438,12 +447,16 @@ def build_index(
             file,
         )
 
+    np.save(idx_dir / "embeddings.npy", embeddings, allow_pickle=False)
+
     # --------------------------------------------------------
     # Store metadata separately
     # --------------------------------------------------------
 
     meta = {
-        "version": 5,
+        "version": INDEX_VERSION,
+        "embedding_model": EMBEDDING_MODEL_NAME,
+        "embedding_dimension": int(embeddings.shape[1]),
         "num_documents": len(
             {
                 chunk["document"]
@@ -818,7 +831,7 @@ def search(
 
     query = query.strip()
 
-    if not query:
+    if not query or k <= 0:
         return []
 
     bm25, chunks = load_index(
@@ -939,6 +952,9 @@ def search(
         result = dict(
             chunk
         )
+        result["chunk_index"] = chunk_index
+        result["bm25_score"] = bm25_score
+        result["retrieval_method"] = "bm25"
 
         result[
             "score"
@@ -1091,3 +1107,143 @@ def search(
         ] = rank
 
     return selected
+
+
+@lru_cache(maxsize=1)
+def get_embedding_model():
+    """Load text embeddings only when requested; prefer the local cache."""
+    from sentence_transformers import SentenceTransformer
+
+    try:
+        return SentenceTransformer(EMBEDDING_MODEL_NAME, local_files_only=True)
+    except OSError:
+        return SentenceTransformer(EMBEDDING_MODEL_NAME)
+
+
+def build_embeddings(texts: list[str]) -> np.ndarray:
+    return np.asarray(get_embedding_model().encode(
+        texts, normalize_embeddings=True, convert_to_numpy=True,
+        show_progress_bar=False,
+    ), dtype=np.float32)
+
+
+def load_embeddings(idx_dir: str | Path) -> np.ndarray:
+    directory = Path(idx_dir)
+    with (directory / "meta.json").open(encoding="utf-8") as file:
+        meta = json.load(file)
+    if not isinstance(meta, dict) or meta.get("embedding_model") != EMBEDDING_MODEL_NAME:
+        raise ValueError("Semantic index is missing or incompatible. Re-index the library.")
+    embeddings = np.load(directory / "embeddings.npy", allow_pickle=False)
+    if (embeddings.ndim != 2
+            or embeddings.shape != (len(meta["chunks"]), meta.get("embedding_dimension"))
+            or not np.isfinite(embeddings).all()):
+        raise ValueError("Invalid embedding matrix. Re-index the library.")
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    if np.any(norms == 0):
+        raise ValueError("Empty embedding vectors. Re-index the library.")
+    return embeddings / norms
+
+
+def _semantic_candidates(idx_dir, query, chunks):
+    embeddings = load_embeddings(idx_dir)
+    query_embedding = build_embeddings([query])[0]
+    if embeddings.shape != (len(chunks), len(query_embedding)):
+        raise ValueError("Embeddings do not match the library. Re-index the library.")
+    scores = embeddings @ query_embedding
+    candidates = []
+    for index, chunk in enumerate(chunks):
+        coverage, matched = calculate_coverage(query, chunk["text"])
+        noise = calculate_noise_penalty(chunk["text"])
+        # A repeated journal header is milder noise than a bibliography.
+        header_hits = sum(term in chunk["text"].lower() for term in ("issn", "international journal"))
+        if header_hits:
+            noise = noise - 1.5 * header_hits + 0.5
+        # Bibliographies often have many years, even without a References heading.
+        years = len(re.findall(r"\b(?:19|20)\d{2}\b", chunk["text"]))
+        noise += 3.0 if years >= 4 else 0.0
+        score = float(scores[index])
+        candidates.append(dict(
+            chunk, chunk_index=index, semantic_score=score, score=score,
+            rerank_score=score - 0.08 * noise, coverage=coverage,
+            matched_terms=matched, noise_penalty=noise,
+            retrieval_method="semantic",
+        ))
+    return sorted(candidates, key=lambda item: item["rerank_score"], reverse=True)
+
+
+def _diverse_results(candidates, k, duplicate_threshold, max_per_page):
+    selected = []
+    pages = Counter()
+    for candidate in candidates:
+        page_key = (candidate["document"], candidate["page"])
+        if pages[page_key] >= max_per_page:
+            continue
+        if any(token_similarity(candidate["text"], other["text"]) >= duplicate_threshold
+               for other in selected):
+            continue
+        selected.append(dict(candidate, rank=len(selected) + 1))
+        pages[page_key] += 1
+        if len(selected) >= k:
+            break
+    return selected
+
+
+def semantic_search(idx_dir, query, k=5, min_score=0.0,
+                    candidate_multiplier=8, duplicate_threshold=0.82, max_per_page=2):
+    if not query.strip() or k <= 0:
+        return []
+    _, chunks = load_index(idx_dir)
+    candidates = _semantic_candidates(idx_dir, query, chunks)
+    return _diverse_results(
+        [item for item in candidates if item["semantic_score"] >= min_score],
+        k, duplicate_threshold, max_per_page,
+    )
+
+
+def hybrid_search(idx_dir, query, k=5, min_score=0.0,
+                  candidate_multiplier=8, duplicate_threshold=0.82, max_per_page=2):
+    """Fuse quality-adjusted ranks, applying diversity only after fusion."""
+    if not query.strip() or k <= 0:
+        return []
+    _, chunks = load_index(idx_dir)
+    depth = min(len(chunks), max(40, k * candidate_multiplier))
+    # Keep unfiltered lexical candidates: no page cap or duplicate removal yet.
+    lexical = search(idx_dir, query, k=len(chunks), min_score=min_score,
+                     duplicate_threshold=2.0, max_per_page=len(chunks))
+    lexical = [item for item in lexical if item["bm25_score"] > 0][:depth]
+    semantic = _semantic_candidates(idx_dir, query, chunks)
+    semantic_by_index = {item["chunk_index"]: item for item in semantic}
+    semantic = [item for item in semantic if item["semantic_score"] >= min_score][:depth]
+    merged = {}
+    for method, ranking in (("bm25", lexical), ("semantic", semantic)):
+        for rank, item in enumerate(ranking, 1):
+            index = item["chunk_index"]
+            result = merged.setdefault(index, dict(
+                semantic_by_index[index], bm25_score=0.0, bm25_rank=None,
+                semantic_rank=None, rrf_score=0.0, retrieval_method="hybrid",
+            ))
+            result[method + "_rank"] = rank
+            result["rrf_score"] += 1.0 / (60 + rank)
+            if method == "bm25":
+                result["bm25_score"] = item["bm25_score"]
+                result["intent_bonus"] = item["intent_bonus"]
+    for result in merged.values():
+        result["hybrid_score"] = result["rrf_score"] / (1 + 0.15 * result["noise_penalty"])
+        if is_methodology_question(query):
+            result["hybrid_score"] *= 1 + 0.25 * methodology_score(result["text"])
+        result["score"] = result["hybrid_score"]
+        result["rerank_score"] = result["hybrid_score"]
+    candidates = sorted(merged.values(), key=lambda item: item["hybrid_score"], reverse=True)
+    return _diverse_results(candidates, k, duplicate_threshold, max_per_page)
+
+
+def is_methodology_question(query: str) -> bool:
+    return bool(re.search(r"\b(how|method|methodology|algorithm|procedure)\b", query, re.I))
+
+
+def methodology_score(text: str) -> int:
+    """Prefer concrete procedure descriptions over feasibility or related work."""
+    return sum(bool(re.search(pattern, text, re.I)) for pattern in (
+        r"outlines our basic method", r"at each step", r"algorithm \d",
+        r"we compute", r"we .*?update", r"next we describe",
+    ))
