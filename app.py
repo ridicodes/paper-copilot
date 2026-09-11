@@ -22,6 +22,7 @@ from src.index import (
     semantic_search,
 )
 from src.evidence import (
+    comparison_topic_terms,
     evidence_is_sufficient as retrieval_is_sufficient,
     passage_is_relevant, supported_passages, methodology_answer_is_complete,
 )
@@ -656,10 +657,20 @@ def select_answer_evidence(
     if is_cross_document_question(
         query
     ):
-        comparison_results = [result for result in results
-            if float(result.get("noise_penalty", 0)) < 3.0
-            and (float(result.get("coverage", 0)) >= 0.20
-                 or float(result.get("semantic_score", 0)) >= 0.30)]
+        topics = comparison_topic_terms(query)
+        comparison_results = []
+        for result in results:
+            if float(result.get("noise_penalty", 0)) >= 3.0:
+                continue
+            text_tokens = set(re.findall(r"[A-Za-z0-9]+", result["text"].lower()))
+            topic_coverage = len(topics & text_tokens) / len(topics) if topics else 1.0
+            semantic_support = (
+                result.get("retrieval_method") in {"semantic", "hybrid"}
+                and float(result.get("semantic_score", 0)) >= 0.30
+                and bool(topics & text_tokens)
+            )
+            if not topics or topic_coverage >= 0.50 or semantic_support:
+                comparison_results.append(result)
         if re.search(r"\bimages?\b", query, re.I):
             image_results = [result for result in comparison_results
                              if re.search(r"\bimages?\b", result["text"], re.I)]
@@ -1097,14 +1108,15 @@ def make_extractive_answer(
             )
             purpose_terms = (
                 "privacy", "sensitive", "protect", "problem", "solve", "analyze",
-                "extract", "predict", "detect", "information",
+                "extract", "predict", "detect", "recognize", "information",
             )
 
             def sentence_score(sentence: str) -> tuple[int, int]:
                 low = sentence.lower()
                 role = sum(term in low for term in role_terms)
                 purpose = sum(term in low for term in purpose_terms)
-                return (min(role, 1) + min(purpose, 1), role + purpose)
+                quality_penalty = 2 if "bias computer" in low else 0
+                return (min(role, 1) + min(purpose, 1), role + purpose - quality_penalty)
 
             ranked = sorted(
                 enumerate(sentences),
@@ -2085,7 +2097,13 @@ if results:
         st.session_state.get("last_query", query),
     ):
         st.warning("The retrieved evidence is too weak or lacks the requested entities to support an answer.")
-    st.caption(f"Best lexical query coverage: {max_coverage:.0%}")
+    comparison_query = is_cross_document_question(
+        st.session_state.get("last_query", query)
+    )
+    coverage_note = f"Best lexical query coverage: {max_coverage:.0%}"
+    if comparison_query:
+        coverage_note += " · representative and semantic evidence are also considered"
+    st.caption(coverage_note)
 
     if is_cross_document_question(
         st.session_state.get(
@@ -2128,6 +2146,8 @@ if results:
         )
     )
 
+    representative_count = len({result.get("document") for result in results})
+
     for rank, result in enumerate(results, start=1):
 
         document = str(
@@ -2157,11 +2177,8 @@ if results:
             )
         )
 
-        strength = (
-            evidence_strength(
-                coverage
-            )
-        )
+        is_representative = comparison_query and rank <= representative_count
+        strength = "Representative" if is_representative else evidence_strength(coverage)
 
         snippet = pick_snippet(
             result.get(
@@ -2201,7 +2218,7 @@ if results:
 
         with meta_col1:
             st.metric(
-                "Lexical match",
+                "Evidence role" if is_representative else "Lexical match",
                 strength,
             )
 

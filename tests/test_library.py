@@ -141,6 +141,15 @@ class LibraryTests(unittest.TestCase):
         self.assertRegex(visible[1]['text'].lower(),
                          r'analy[sz]e images|predict or detect|recognize patterns')
 
+        generic = (
+            'What challenge does each paper try to address, '
+            'and how do their approaches differ?'
+        )
+        generic_results = namespace['comparison_first_results'](
+            generic, hybrid_search('outputs/library_index', generic, k=20))
+        self.assertEqual(len({result['document'] for result in generic_results[:2]}), 2)
+        self.assertTrue(namespace['evidence_is_sufficient'](generic_results, generic))
+
         image_comparison = 'Compare the role of images in the two papers.'
         selected = namespace['select_answer_evidence'](
             image_comparison, hybrid_search('outputs/library_index', image_comparison, k=20))

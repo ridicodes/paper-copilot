@@ -68,6 +68,15 @@ class RetrievalTests(unittest.TestCase):
         self.assertFalse(evidence_is_sufficient('Compare both papers', [result], comparison=True))
         self.assertFalse(evidence_is_sufficient('Privacy?', [dict(result, noise_penalty=4)]))
         self.assertFalse(evidence_is_sufficient('Unknown topic?', [dict(result, semantic_score=.1)]))
+        other = dict(result, document='b.pdf', text='Vision analyzes images.')
+        self.assertTrue(evidence_is_sufficient(
+            'What challenge does each paper address, and how do their approaches differ?',
+            [result, other], comparison=True,
+        ))
+        self.assertFalse(evidence_is_sufficient(
+            'How do both papers discuss medieval poetry?',
+            [result, other], comparison=True,
+        ))
 
     def test_comparison_detection_uses_whole_words(self):
         self.assertFalse(index.is_comparison_question(
@@ -75,6 +84,8 @@ class RetrievalTests(unittest.TestCase):
         self.assertFalse(index.is_comparison_question('What is differential privacy?'))
         self.assertTrue(index.is_comparison_question(
             'How do the two papers use machine learning differently?'))
+        self.assertTrue(index.is_comparison_question(
+            'What challenge does each paper address, and how do their approaches differ?'))
 
     def test_query_normalization_removes_pasted_markdown(self):
         decorated = 'Ask: > **How do the two papers use machine learning differently?**'

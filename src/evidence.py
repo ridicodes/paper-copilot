@@ -3,12 +3,33 @@
 import re
 import unicodedata
 
-from src.index import GENERIC_QUERY_WORDS, STOPWORDS, tokenize, is_methodology_question, methodology_score
+from src.index import (
+    GENERIC_QUERY_WORDS,
+    STOPWORDS,
+    is_methodology_question,
+    methodology_score,
+    query_terms,
+    tokenize,
+)
 
 LEXICAL_THRESHOLD = 0.50
 SEMANTIC_THRESHOLD = 0.55
 METHODOLOGY_SEMANTIC_THRESHOLD = 0.35
 CURRENCY_WORDS = {"dollar", "dollars", "usd", "euro", "euros", "rupee", "rupees"}
+COMPARISON_META_TERMS = {
+    "address", "addresses", "aim", "aims", "approach", "approaches",
+    "both", "challenge", "challenges", "compare", "compared", "comparison",
+    "contrast", "differ", "difference", "differences", "differently", "does", "each",
+    "goal", "goals", "method", "methods", "paper", "papers", "problem",
+    "problems", "purpose", "purposes", "role", "roles", "similar",
+    "similarities", "similarity", "solve", "solves", "their", "try", "two",
+    "use", "uses",
+}
+
+
+def comparison_topic_terms(query: str) -> set[str]:
+    """Return subject terms, excluding words that only express comparison intent."""
+    return set(query_terms(query)) - COMPARISON_META_TERMS
 
 
 def passage_is_relevant(result: dict) -> bool:
@@ -52,11 +73,31 @@ def supported_passages(query: str, results: list[dict]) -> list[dict]:
 def evidence_is_sufficient(query: str, results: list[dict], comparison=False) -> bool:
     supported = supported_passages(query, results)
     if comparison:
-        comparison_passages = [item for item in results
-            if float(item.get("noise_penalty", 0)) < 3.0
-            and (float(item.get("coverage", 0)) >= 0.20
-                 or float(item.get("semantic_score", 0)) >= 0.30)]
-        return len({item["document"] for item in comparison_passages}) >= 2
+        anchors = query_anchors(query)
+        topics = comparison_topic_terms(query)
+        documents = set()
+        for item in results:
+            if float(item.get("noise_penalty", 0)) >= 3.0:
+                continue
+            tokens = set(tokenize(
+                unicodedata.normalize("NFKC", item.get("text", "")),
+                remove_stopwords=False,
+            ))
+            if not anchors.issubset(tokens):
+                continue
+            topic_coverage = len(topics & tokens) / len(topics) if topics else 1.0
+            semantic_support = (
+                item.get("retrieval_method") in {"semantic", "hybrid"}
+                and float(item.get("semantic_score", 0)) >= 0.30
+            )
+            # Document-level comparison prompts may contain only relational words
+            # ("each paper", "their approaches"). In that case, clean evidence
+            # from each document is sufficient; topical prompts still need lexical
+            # topic overlap or independently strong semantic support.
+            if (not topics or topic_coverage >= 0.50
+                    or (semantic_support and bool(topics & tokens))):
+                documents.add(item["document"])
+        return len(documents) >= 2
     return bool(supported)
 
 

@@ -1247,10 +1247,25 @@ def hybrid_search(idx_dir, query, k=5, min_score=0.0,
         # A comparison cannot be answered from a top-k list monopolized by one
         # paper. Lead with each document's strongest candidate, then preserve
         # the fused order for all remaining passages.
+        summary_phrases = (
+            "abstract", "introduction", "in this paper", "our approach", "our work",
+            "we develop", "we propose", "we introduce", "we present", "we combine",
+            "purpose", "goal", "conclusion", "privacy guarantees", "analyze images",
+            "extracting their features", "predict or detect", "recognize patterns",
+        )
+
+        def document_summary_score(candidate):
+            low = candidate.get("text", "").lower()
+            signal = sum(phrase in low for phrase in summary_phrases)
+            return (signal, candidate["hybrid_score"])
+
         first_by_document = {}
         for candidate in candidates:
-            first_by_document.setdefault(candidate["document"], candidate)
-        leaders = list(first_by_document.values())
+            document = candidate["document"]
+            current = first_by_document.get(document)
+            if current is None or document_summary_score(candidate) > document_summary_score(current):
+                first_by_document[document] = candidate
+        leaders = sorted(first_by_document.values(), key=document_summary_score, reverse=True)
         leader_ids = {item["chunk_index"] for item in leaders}
         candidates = leaders + [item for item in candidates
                                 if item["chunk_index"] not in leader_ids]
@@ -1259,13 +1274,28 @@ def hybrid_search(idx_dir, query, k=5, min_score=0.0,
 
 def is_comparison_question(query: str) -> bool:
     low = normalize_query(query).lower()
-    return any(re.search(rf"\b{re.escape(term)}\b", low) for term in (
+    explicit_comparison = any(re.search(rf"\b{re.escape(term)}\b", low) for term in (
         "compare", "comparison", "compared", "differently", "difference",
         "differences", "similar", "similarity", "similarities", "both papers",
         "two papers", "between the papers", "between these papers",
         "across papers", "across the papers", "how do the papers",
         "how do these papers",
     ))
+    document_scope = bool(re.search(
+        r"\b(?:each|both|two)\s+(?:of\s+the\s+)?papers?\b|"
+        r"\b(?:the|these)\s+papers?\b|"
+        r"\btheir\s+(?:approaches|methods|goals|purposes|results|findings)\b",
+        low,
+    ))
+    contrast_intent = bool(re.search(
+        r"\b(?:compar\w*|differ\w*|similar\w*|contrast\w*|versus|vs\.?)\b",
+        low,
+    ))
+    per_document_intent = bool(re.search(
+        r"\b(?:each|both)\s+(?:of\s+the\s+)?papers?\b",
+        low,
+    ))
+    return explicit_comparison or (document_scope and (contrast_intent or per_document_intent))
 
 
 def is_methodology_question(query: str) -> bool:
