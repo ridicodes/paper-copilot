@@ -74,6 +74,56 @@ class LibraryTests(unittest.TestCase):
         for phrase in ['clip', 'compute the average', 'add noise', 'privacy accountant']:
             self.assertIn(phrase, fallback)
 
+    def test_direct_definition_and_sensor_evidence_selection(self):
+        namespace = {}
+        source = Path('app.py').read_text().split('st.set_page_config(')[0]
+        exec(compile(source, 'app.py', 'exec'), namespace)
+        cases = [
+            ('What does differential privacy protect in the training dataset?', 2, 'one record'),
+        ]
+        for query, page, phrase in cases:
+            results = hybrid_search('outputs/library_index', query, k=20)
+            selected = namespace['select_answer_evidence'](query, results)
+            self.assertEqual(selected[0]['page'], page)
+            self.assertIn(phrase, selected[0]['text'].lower())
+
+    def test_accuracy_question_selects_reported_values(self):
+        namespace = {}
+        source = Path('app.py').read_text().split('st.set_page_config(')[0]
+        exec(compile(source, 'app.py', 'exec'), namespace)
+        query = 'What MNIST test accuracies are reported for different privacy budgets?'
+        selected = namespace['select_answer_evidence'](
+            query, hybrid_search('outputs/library_index', query, k=20))
+        self.assertEqual(selected[0]['page'], 6)
+        for value in ('90%', '95%', '97%'):
+            self.assertIn(value, selected[0]['text'])
+
+    def test_concise_direct_evidence_selection(self):
+        namespace = {}
+        source = Path('app.py').read_text().split('st.set_page_config(')[0]
+        exec(compile(source, 'app.py', 'exec'), namespace)
+        cases = [
+            ('What weaknesses of region-based segmentation techniques are discussed?', [5]),
+            ('Why are edge detection and segmentation important in computer vision applications?', [3]),
+            ('Which datasets are used to evaluate the private neural networks?', [6]),
+        ]
+        for query, pages in cases:
+            selected = namespace['select_answer_evidence'](
+                query, hybrid_search('outputs/library_index', query, k=20))
+            self.assertEqual([result['page'] for result in selected], pages)
+
+        comparison = 'How do the two papers use machine learning differently?'
+        selected = namespace['select_answer_evidence'](
+            comparison, hybrid_search('outputs/library_index', comparison, k=20))
+        self.assertEqual(len(selected), 2)
+        self.assertEqual(len({result['document'] for result in selected}), 2)
+
+        image_comparison = 'Compare the role of images in the two papers.'
+        selected = namespace['select_answer_evidence'](
+            image_comparison, hybrid_search('outputs/library_index', image_comparison, k=20))
+        self.assertEqual(len({result['document'] for result in selected}), 2)
+        self.assertTrue(all('image' in result['text'].lower() for result in selected))
+
     def test_page_viewer_and_mode_changes(self):
         from streamlit.testing.v1 import AppTest
         app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / 'app.py'),

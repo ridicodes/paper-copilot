@@ -1234,11 +1234,37 @@ def hybrid_search(idx_dir, query, k=5, min_score=0.0,
         result["score"] = result["hybrid_score"]
         result["rerank_score"] = result["hybrid_score"]
     candidates = sorted(merged.values(), key=lambda item: item["hybrid_score"], reverse=True)
+    if is_comparison_question(query):
+        # A comparison cannot be answered from a top-k list monopolized by one
+        # paper. Lead with each document's strongest candidate, then preserve
+        # the fused order for all remaining passages.
+        first_by_document = {}
+        for candidate in candidates:
+            first_by_document.setdefault(candidate["document"], candidate)
+        leaders = list(first_by_document.values())
+        leader_ids = {item["chunk_index"] for item in leaders}
+        candidates = leaders + [item for item in candidates
+                                if item["chunk_index"] not in leader_ids]
     return _diverse_results(candidates, k, duplicate_threshold, max_per_page)
 
 
+def is_comparison_question(query: str) -> bool:
+    low = query.lower()
+    return any(re.search(rf"\b{re.escape(term)}\b", low) for term in (
+        "compare", "comparison", "differently", "difference", "differences",
+        "both papers", "two papers", "between the papers", "across papers",
+    ))
+
+
 def is_methodology_question(query: str) -> bool:
-    return bool(re.search(r"\b(how|method|methodology|algorithm|procedure)\b", query, re.I))
+    if is_comparison_question(query):
+        return False
+    low = query.lower()
+    if re.search(r"\b(method|methodology|algorithm|procedure|operation|perform|accumulat)\w*\b", low):
+        return True
+    if low.startswith("how can"):
+        return bool(re.search(r"\b(train|learn|privacy|private|protect|gradient)\w*\b", low))
+    return bool(re.search(r"\bhow (?:do|does|are|is)\b", low))
 
 
 def methodology_score(text: str) -> int:

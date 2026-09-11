@@ -30,7 +30,9 @@ def citations_are_complete(answer: str) -> bool:
 def normalize_answer(answer: str, query: str) -> str:
     """Remove a repeated question or an introductory label made from its words."""
     lines = answer.strip().splitlines()
-    words = set(re.findall(r"[a-z]+", query.lower())) | {"the", "following", "are", "is", "in", "ways"}
+    words = set(re.findall(r"[a-z]+", query.lower())) | {
+        "the", "following", "are", "is", "in", "ways", "performs", "two", "on"
+    }
     while lines:
         first = lines[0].strip()
         label = first.rstrip(":")

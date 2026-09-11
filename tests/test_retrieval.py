@@ -8,7 +8,7 @@ from unittest.mock import patch
 import numpy as np
 
 from src import index
-from src.evidence import evidence_is_sufficient
+from src.evidence import evidence_is_sufficient, query_anchors
 
 
 class RetrievalTests(unittest.TestCase):
@@ -68,6 +68,16 @@ class RetrievalTests(unittest.TestCase):
         self.assertFalse(evidence_is_sufficient('Compare both papers', [result], comparison=True))
         self.assertFalse(evidence_is_sufficient('Privacy?', [dict(result, noise_penalty=4)]))
         self.assertFalse(evidence_is_sufficient('Unknown topic?', [dict(result, semantic_score=.1)]))
+
+    def test_comparison_detection_uses_whole_words(self):
+        self.assertFalse(index.is_comparison_question(
+            'What results are reported for different privacy budgets?'))
+        self.assertFalse(index.is_comparison_question('What is differential privacy?'))
+        self.assertTrue(index.is_comparison_question(
+            'How do the two papers use machine learning differently?'))
+
+    def test_currency_is_an_explicit_anchor(self):
+        self.assertIn('dollars', query_anchors('What was the training cost in US dollars?'))
 
     def test_citation_metadata_is_preserved(self):
         # Load pure app helpers without running the Streamlit page.

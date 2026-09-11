@@ -68,3 +68,7 @@ HF_HUB_OFFLINE=1 python scripts/validate_week6.py --live
 ```
 
 The report defaults to `/tmp/paper-copilot-week6-validation.json`; generated reports and indexes should not be committed.
+
+## Week 7 evaluation
+
+The labelled 32-question benchmark, retrieval and answer evaluators, measured results, tuning rationale, and limitations are documented in [WEEK7_EVALUATION.md](WEEK7_EVALUATION.md). On this local set, BM25 has the best Hit@1 and MRR, while Hybrid reaches 100% Hit@5, unsupported rejection, comparison document coverage, and final grounded-answer rate, with no reference-noise passages in the top five.

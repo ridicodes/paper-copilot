@@ -5,26 +5,33 @@ import unicodedata
 
 from src.index import GENERIC_QUERY_WORDS, STOPWORDS, tokenize, is_methodology_question, methodology_score
 
+LEXICAL_THRESHOLD = 0.50
+SEMANTIC_THRESHOLD = 0.55
+METHODOLOGY_SEMANTIC_THRESHOLD = 0.35
+CURRENCY_WORDS = {"dollar", "dollars", "usd", "euro", "euros", "rupee", "rupees"}
+
 
 def passage_is_relevant(result: dict) -> bool:
     if float(result.get("noise_penalty", 0)) >= 3.0:
         return False
-    lexical = (float(result.get("coverage", 0)) >= 0.50
+    lexical = (float(result.get("coverage", 0)) >= LEXICAL_THRESHOLD
                and float(result.get("bm25_score", result.get("score", 0))) > 0)
     # Prototype threshold checked against the local library; not a probability.
     semantic = (result.get("retrieval_method") in {"semantic", "hybrid"}
-                and float(result.get("semantic_score", 0)) >= 0.55)
+                and float(result.get("semantic_score", 0)) >= SEMANTIC_THRESHOLD)
     return lexical or semantic
 
 
 def query_anchors(query: str) -> set[str]:
     """Keep acronyms, versioned identifiers, and names within the question."""
     words = re.findall(r"[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*", query)
-    return {word.lower() for position, word in enumerate(words)
+    anchors = {word.lower() for position, word in enumerate(words)
             if (len(word) >= 2 and word.isupper() and word.isalpha())
             or (any(c.isalpha() for c in word) and any(c.isdigit() for c in word))
             or (position > 0 and word[0].isupper()
                 and word.lower() not in STOPWORDS | GENERIC_QUERY_WORDS)}
+    anchors.update(word.lower() for word in words if word.lower() in CURRENCY_WORDS)
+    return anchors
 
 
 def supported_passages(query: str, results: list[dict]) -> list[dict]:
@@ -33,7 +40,7 @@ def supported_passages(query: str, results: list[dict]) -> list[dict]:
                         and anchors.issubset(set(tokenize(r.get("text", ""), False)))}
     return [result for result in results if (passage_is_relevant(result) or (
         is_methodology_question(query) and result["document"] in strong_documents
-        and float(result.get("semantic_score", 0)) >= 0.35
+        and float(result.get("semantic_score", 0)) >= METHODOLOGY_SEMANTIC_THRESHOLD
         and float(result.get("noise_penalty", 0)) < 3.0
         and methodology_score(result.get("text", "")) >= 2))
             and anchors.issubset(set(tokenize(
@@ -45,7 +52,11 @@ def supported_passages(query: str, results: list[dict]) -> list[dict]:
 def evidence_is_sufficient(query: str, results: list[dict], comparison=False) -> bool:
     supported = supported_passages(query, results)
     if comparison:
-        return len({item["document"] for item in supported}) >= 2
+        comparison_passages = [item for item in results
+            if float(item.get("noise_penalty", 0)) < 3.0
+            and (float(item.get("coverage", 0)) >= 0.20
+                 or float(item.get("semantic_score", 0)) >= 0.30)]
+        return len({item["document"] for item in comparison_passages}) >= 2
     return bool(supported)
 
 
