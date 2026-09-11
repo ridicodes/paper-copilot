@@ -27,7 +27,12 @@ from src.evidence import (
     passage_is_relevant, supported_passages, methodology_answer_is_complete,
 )
 from src.llm import ollama_chat
-from src.citations import citations_are_complete, normalize_answer
+from src.citations import (
+    citations_are_complete,
+    comparison_citations_cover_documents,
+    normalize_answer,
+    repair_comparison_synthesis_citations,
+)
 from src.index import is_methodology_question, methodology_score
 
 
@@ -1350,6 +1355,8 @@ ANSWER RULES
 12. If one statement needs multiple passages, use:
     [E1] [E2]
 13. For comparison questions, support EACH side of the comparison with its own evidence.
+    If a sentence directly contrasts Paper A and Paper B, end it with evidence
+    for both sides, for example: [E1] [E2]
 14. Do not add an "Additionally" section unless explicitly requested.
 15. Write only cited answer sentences or cited bullets. Omit headings, introductions, repeated questions, and uncited conclusions.
 16. For how/method questions, explain the concrete procedure in the evidence, not just its feasibility. When an algorithm is supplied, include its distinct operations in order, including intermediate transformations, aggregation, updates, and any accounting step; do not collapse them into a vague summary.
@@ -2001,6 +2008,12 @@ if answer_clicked:
                         normalize_answer(raw_answer, query)
                     )
 
+                    if is_cross_document_question(query):
+                        normalized_answer = repair_comparison_synthesis_citations(
+                            normalized_answer,
+                            evidence_map,
+                        )
+
                     if (
                         normalized_answer
                         == "Not found in the provided evidence."
@@ -2012,7 +2025,10 @@ if answer_clicked:
                     elif evidence_ids_are_valid(
                         normalized_answer,
                         evidence_map,
-                    ) and (not is_methodology_question(query)
+                    ) and (not is_cross_document_question(query)
+                           or comparison_citations_cover_documents(
+                               normalized_answer, evidence_map,
+                           )) and (not is_methodology_question(query)
                            or is_cross_document_question(query)
                            or methodology_answer_is_complete(normalized_answer, answer_results)):
                         final_answer = (

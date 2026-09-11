@@ -43,3 +43,73 @@ def normalize_answer(answer: str, query: str) -> str:
         else:
             break
     return "\n".join(lines).strip()
+
+
+def repair_comparison_synthesis_citations(
+    answer: str,
+    evidence_map: dict[str, dict],
+) -> str:
+    """Cite one uncited A/B contrast with evidence already cited for both papers.
+
+    This does not relax ``citations_are_complete``. It only repairs the common
+    comparison shape where cited paper-specific bullets are followed by one
+    uncited sentence explicitly contrasting those same paper labels.
+    """
+    used_ids = [match.upper() for match in re.findall(r"\[(E\d+)\]", answer, re.I)]
+    if not used_ids or any(evidence_id not in evidence_map for evidence_id in used_ids):
+        return answer
+
+    cited_by_document: dict[str, str] = {}
+    for evidence_id in used_ids:
+        document = str(evidence_map[evidence_id].get("document", ""))
+        if document:
+            cited_by_document.setdefault(document, evidence_id)
+    if len(cited_by_document) < 2:
+        return answer
+
+    repaired_lines: list[str] = []
+    repairs = 0
+    for line in answer.splitlines():
+        stripped = line.strip()
+        if not stripped or re.search(r"\[E\d+\]", stripped, re.I):
+            repaired_lines.append(line)
+            continue
+
+        paper_labels = set(re.findall(r"\bPaper\s+([A-Z0-9]+)\b", stripped, re.I))
+        contrast = bool(re.search(
+            r"\b(?:differ\w*|whereas|while|in contrast|compared with|compared to)\b",
+            stripped,
+            re.I,
+        ))
+        sentence_count = len([
+            unit for unit in re.split(r"(?<=[.!?])\s+", stripped) if unit.strip()
+        ])
+        if repairs == 0 and contrast and len(paper_labels) >= 2 and sentence_count == 1:
+            citations = " ".join(
+                f"[{evidence_id}]" for evidence_id in cited_by_document.values()
+            )
+            repaired_lines.append(f"{line.rstrip()} {citations}")
+            repairs += 1
+        else:
+            repaired_lines.append(line)
+
+    return "\n".join(repaired_lines).strip()
+
+
+def comparison_citations_cover_documents(
+    answer: str,
+    evidence_map: dict[str, dict],
+) -> bool:
+    """Require a comparison answer to cite evidence from every selected paper."""
+    required_documents = {
+        str(evidence.get("document", "")) for evidence in evidence_map.values()
+        if evidence.get("document")
+    }
+    cited_documents = {
+        str(evidence_map[evidence_id].get("document", ""))
+        for evidence_id in (
+            match.upper() for match in re.findall(r"\[(E\d+)\]", answer, re.I)
+        )
+        if evidence_id in evidence_map
+    }
+    return len(required_documents) >= 2 and required_documents <= cited_documents
