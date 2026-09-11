@@ -1,6 +1,7 @@
 import unittest
 from src.citations import (
     citations_are_complete,
+    claims_are_supported_by_citations,
     comparison_citations_cover_documents,
     normalize_answer,
     normalize_comparison_answer,
@@ -90,3 +91,34 @@ class CitationTests(unittest.TestCase):
                       normalize_comparison_answer(uncited_claim))
         self.assertFalse(citations_are_complete(
             normalize_comparison_answer(uncited_claim)))
+
+    def test_claims_must_match_the_exact_cited_evidence(self):
+        evidence = {
+            'E1': {
+                'document': 'privacy.pdf',
+                'grounding_text': (
+                    'We combine machine learning with advanced privacy-preserving '
+                    'mechanisms, training neural networks within a privacy budget.'
+                ),
+            },
+            'E2': {
+                'document': 'vision.pdf',
+                'grounding_text': (
+                    'Machine learning and image processing recognize patterns '
+                    'of increasingly diverse objects.'
+                ),
+            },
+        }
+        grounded = (
+            '- Paper A trains neural networks with privacy-preserving mechanisms '
+            'within a privacy budget. [E1]\n'
+            '- Paper B uses machine learning and image processing to recognize '
+            'object patterns. [E2]'
+        )
+        self.assertTrue(claims_are_supported_by_citations(grounded, evidence))
+
+        misattributed = grounded.replace(
+            'trains neural networks with privacy-preserving mechanisms within a privacy budget',
+            'uses regularization to avoid overfitting and explain internal representations',
+        )
+        self.assertFalse(claims_are_supported_by_citations(misattributed, evidence))

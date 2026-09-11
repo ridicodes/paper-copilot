@@ -169,3 +169,62 @@ def comparison_citations_cover_documents(
         if evidence_id in evidence_map
     }
     return len(required_documents) >= 2 and required_documents <= cited_documents
+
+
+_GROUNDING_STOPWORDS = {
+    "about", "after", "also", "because", "being", "each", "from", "have",
+    "into", "main", "method", "objective", "paper", "that", "their", "these",
+    "this", "those", "through", "uses", "using", "what", "which", "while",
+    "with", "within",
+}
+
+
+def _grounding_terms(text: str) -> set[str]:
+    terms = set()
+    for token in re.findall(r"[A-Za-z0-9]+", text.lower()):
+        if len(token) < 4 or token in _GROUNDING_STOPWORDS:
+            continue
+        # Lightweight normalization catches common singular/plural and verb forms.
+        for suffix in ("ing", "ed", "es", "s"):
+            if token.endswith(suffix) and len(token) - len(suffix) >= 4:
+                token = token[:-len(suffix)]
+                break
+        terms.add(token)
+    return terms
+
+
+def claims_are_supported_by_citations(
+    answer: str,
+    evidence_map: dict[str, dict],
+    minimum_overlap: float = 0.30,
+) -> bool:
+    """Check each cited claim against the exact evidence text supplied to the LLM.
+
+    This is a conservative lexical entailment screen, not a general entailment
+    model. It catches citations attached to claims whose content came from a
+    different part of the source chunk or from the model itself.
+    """
+    text = re.sub(r"([.!?])\s*((?:\[E\d+\][ \t]*)+)", r" \2\1", answer,
+                  flags=re.I)
+    units = re.split(r"\n+|(?<=[.!?])\s+(?=[A-Za-z0-9*•\-])", text)
+    checked = 0
+    for unit in units:
+        evidence_ids = [match.upper() for match in re.findall(r"\[(E\d+)\]", unit, re.I)]
+        if not evidence_ids:
+            continue
+        claim = re.sub(r"\[E\d+\]", "", unit, flags=re.I)
+        claim_terms = _grounding_terms(claim)
+        if not claim_terms:
+            return False
+        evidence_terms: set[str] = set()
+        for evidence_id in evidence_ids:
+            evidence = evidence_map.get(evidence_id)
+            if evidence is None:
+                return False
+            evidence_terms |= _grounding_terms(str(
+                evidence.get("grounding_text", evidence.get("text", ""))
+            ))
+        if len(claim_terms & evidence_terms) / len(claim_terms) < minimum_overlap:
+            return False
+        checked += 1
+    return checked > 0

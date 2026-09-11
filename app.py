@@ -29,6 +29,7 @@ from src.evidence import (
 from src.llm import ollama_chat
 from src.citations import (
     citations_are_complete,
+    claims_are_supported_by_citations,
     comparison_citations_cover_documents,
     normalize_answer,
     normalize_comparison_answer,
@@ -1283,9 +1284,19 @@ def build_answer_prompt(
             )
         )
 
-        # Keep complete page-bounded chunks: lexical snippets can omit the
-        # procedural details that made semantic evidence useful.
-        text = result.get("text", "").strip()
+        # Comparison prompts need the representative contribution statement,
+        # not unrelated background from elsewhere in the same long chunk.
+        if is_cross_document_question(query):
+            text = pick_snippet(
+                result.get("text", ""),
+                query_keywords(query),
+                query=query,
+                max_len=1400,
+            )
+        else:
+            # Keep complete page-bounded chunks for procedural questions.
+            text = result.get("text", "").strip()
+        evidence_map[evidence_id] = dict(result, grounding_text=text)
 
         evidence_blocks.append(
             (
@@ -2038,7 +2049,10 @@ if answer_clicked:
                     ) and (not is_cross_document_question(query)
                            or comparison_citations_cover_documents(
                                normalized_answer, evidence_map,
-                           )) and (not is_methodology_question(query)
+                           )) and (not is_cross_document_question(query)
+                                  or claims_are_supported_by_citations(
+                                      normalized_answer, evidence_map,
+                                  )) and (not is_methodology_question(query)
                            or is_cross_document_question(query)
                            or methodology_answer_is_complete(normalized_answer, answer_results)):
                         final_answer = (
