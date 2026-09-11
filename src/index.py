@@ -145,7 +145,7 @@ def query_terms(
     """
 
     terms = tokenize(
-        query,
+        normalize_query(query),
         remove_stopwords=True,
     )
 
@@ -155,6 +155,15 @@ def query_terms(
         if term not in GENERIC_QUERY_WORDS
         and (len(term) > 2 or term.isdigit())
     ]
+
+
+def normalize_query(query: str) -> str:
+    """Remove common chat and Markdown wrappers without changing meaning."""
+    cleaned = query.strip()
+    cleaned = re.sub(r"^\s*(?:ask\s*:\s*)?>\s*", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"^\s*ask\s*:\s*", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"^(?:\*\*|__)(.*)(?:\*\*|__)$", r"\1", cleaned)
+    return cleaned.strip()
 
 
 # ============================================================
@@ -1249,7 +1258,7 @@ def hybrid_search(idx_dir, query, k=5, min_score=0.0,
 
 
 def is_comparison_question(query: str) -> bool:
-    low = query.lower()
+    low = normalize_query(query).lower()
     return any(re.search(rf"\b{re.escape(term)}\b", low) for term in (
         "compare", "comparison", "compared", "differently", "difference",
         "differences", "similar", "similarity", "similarities", "both papers",

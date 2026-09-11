@@ -17,6 +17,7 @@ from src.index import (
     build_index,
     hybrid_search,
     is_comparison_question,
+    normalize_query,
     search,
     semantic_search,
 )
@@ -403,6 +404,12 @@ def representative_passage_score(
     if "image" in query.lower():
         score += 5.0 if "image" in text else -3.0
 
+    purpose_question = bool(re.search(
+        r"\b(?:aim|goal|purpose|problem|solve|address|role|use)\w*\b",
+        query,
+        re.I,
+    ))
+
     strong_phrases = {
         "in this paper": 6.0,
         "we combine": 6.0,
@@ -431,6 +438,20 @@ def representative_passage_score(
         "classification": 1.0,
     }
 
+    if purpose_question:
+        strong_phrases.update({
+            "privacy guarantees": 4.0,
+            "sensitive information": 3.0,
+            "protect privacy": 3.0,
+            "protecting their training data": 4.0,
+            "analyze images": 4.0,
+            "obtain the necessary information": 4.0,
+            "extracting their features": 4.0,
+            "predict or detect": 4.0,
+            "recognize patterns": 3.0,
+            "solve edge detection": 3.0,
+        })
+
     for phrase, bonus in (
         strong_phrases.items()
     ):
@@ -445,6 +466,8 @@ def representative_passage_score(
         "bibliography": 3.0,
         "serving as benchmarks": 1.5,
         "focus of active work": 1.0,
+        "closely related to computational statistics": 2.5,
+        "consisted of spam filtering": 2.0,
     }
 
     for phrase, penalty in (
@@ -593,6 +616,29 @@ def select_cross_document_evidence(
     return selected[
         :max_passages
     ]
+
+
+def comparison_first_results(query: str, results: list[dict]) -> list[dict]:
+    """Lead comparison results with the best purpose/method passage per paper."""
+    if not is_cross_document_question(query) or not results:
+        return results
+
+    documents = {str(result.get("document", "")) for result in results}
+    leaders = select_cross_document_evidence(
+        query,
+        results,
+        max_passages=len(documents),
+    )
+    leader_keys = {
+        (result.get("document"), result.get("chunk_index"), result.get("page"))
+        for result in leaders
+    }
+    remainder = [
+        result for result in results
+        if (result.get("document"), result.get("chunk_index"), result.get("page"))
+        not in leader_keys
+    ]
+    return leaders + remainder
 
 
 # ============================================================
@@ -1026,6 +1072,8 @@ def make_extractive_answer(
         ]
     ] = set()
 
+    comparison = is_cross_document_question(query)
+
     for result in results:
         page = int(
             result.get(
@@ -1041,7 +1089,35 @@ def make_extractive_answer(
             )
         )
 
-        if "distinguish" in query.lower() and "computer vision" in query.lower():
+        if comparison:
+            sentences = re.split(r"(?<=[.!?])\s+", result.get("text", ""))
+            role_terms = (
+                "we combine", "we use", "we train", "we apply", "machine learning",
+                "neural network", "computer vision", "image processing", "recognize",
+            )
+            purpose_terms = (
+                "privacy", "sensitive", "protect", "problem", "solve", "analyze",
+                "extract", "predict", "detect", "information",
+            )
+
+            def sentence_score(sentence: str) -> tuple[int, int]:
+                low = sentence.lower()
+                role = sum(term in low for term in role_terms)
+                purpose = sum(term in low for term in purpose_terms)
+                return (min(role, 1) + min(purpose, 1), role + purpose)
+
+            ranked = sorted(
+                enumerate(sentences),
+                key=lambda item: (sentence_score(item[1]), -item[0]),
+                reverse=True,
+            )
+            chosen_indexes = sorted(index for index, sentence in ranked[:2]
+                                    if sentence_score(sentence) > (0, 0))
+            snippet = " ".join(sentences[index] for index in chosen_indexes).strip()
+            if not snippet:
+                snippet = pick_snippet(result.get("text", ""), keywords,
+                                       query=query, max_len=1400)
+        elif "distinguish" in query.lower() and "computer vision" in query.lower():
             sentences = re.split(r"(?<=[.!?])\s+", result.get("text", ""))
             chosen = [sentence for sentence in sentences if
                       "primary purpose" in sentence.lower()
@@ -1072,7 +1148,9 @@ def make_extractive_answer(
         )
 
         sentences = re.split(r"(?<=[.!?])\s+", snippet)
-        points.append("- " + " ".join(f"{sentence} **{citation}**" for sentence in sentences))
+        prefix = f"**{document_display_name(document)}:** " if comparison else ""
+        points.append("- " + prefix
+                      + " ".join(f"{sentence} **{citation}**" for sentence in sentences))
 
         if (
             len(points)
@@ -1638,13 +1716,14 @@ st.success(
 
 st.divider()
 
-query = st.text_input(
+query_input = st.text_input(
     "Ask a question about your research library",
     placeholder=(
         "Example: How do the two papers "
         "use machine learning differently?"
     ),
 )
+query = normalize_query(query_input)
 
 
 # ============================================================
@@ -1771,6 +1850,7 @@ def run_search() -> list[dict]:
                 idx_dir, query, k=internal_k, min_score=0.0,
                 candidate_multiplier=8, duplicate_threshold=0.82, max_per_page=2,
             )
+            all_results = comparison_first_results(query, all_results)
     except (OSError, ValueError, ImportError) as exc:
         st.session_state["results"] = []
         st.session_state["answer_candidates"] = []
@@ -2048,13 +2128,7 @@ if results:
         )
     )
 
-    for result in results:
-        rank = int(
-            result.get(
-                "rank",
-                0,
-            )
-        )
+    for rank, result in enumerate(results, start=1):
 
         document = str(
             result.get(

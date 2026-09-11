@@ -76,6 +76,14 @@ class RetrievalTests(unittest.TestCase):
         self.assertTrue(index.is_comparison_question(
             'How do the two papers use machine learning differently?'))
 
+    def test_query_normalization_removes_pasted_markdown(self):
+        decorated = 'Ask: > **How do the two papers use machine learning differently?**'
+        self.assertEqual(
+            index.normalize_query(decorated),
+            'How do the two papers use machine learning differently?',
+        )
+        self.assertNotIn('ask', index.query_terms(decorated))
+
     def test_currency_is_an_explicit_anchor(self):
         self.assertIn('dollars', query_anchors('What was the training cost in US dollars?'))
 

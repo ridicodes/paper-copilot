@@ -118,6 +118,29 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(len(selected), 2)
         self.assertEqual(len({result['document'] for result in selected}), 2)
 
+        conceptual = (
+            'How do the two papers use machine learning differently, '
+            'and what problem does each paper aim to solve?'
+        )
+        selected = namespace['select_answer_evidence'](
+            conceptual, hybrid_search('outputs/library_index', conceptual, k=20))
+        self.assertEqual(len({result['document'] for result in selected}), 2)
+        privacy = ' '.join(result['text'].lower() for result in selected
+                           if result['document'].startswith('1607'))
+        vision = ' '.join(result['text'].lower() for result in selected
+                          if result['document'].startswith('Computer_Vision'))
+        self.assertIn('privacy', privacy)
+        self.assertRegex(vision, r'analy[sz]e images|predict or detect|recognize patterns')
+        fallback = namespace['make_extractive_answer'](conceptual, selected)
+        self.assertIn('privacy', fallback.lower())
+        self.assertRegex(fallback.lower(), r'analy[sz]e images|predict or detect|recognize')
+        visible = namespace['comparison_first_results'](
+            conceptual, hybrid_search('outputs/library_index', conceptual, k=20))
+        self.assertEqual(len({result['document'] for result in visible[:2]}), 2)
+        self.assertIn('privacy', visible[0]['text'].lower())
+        self.assertRegex(visible[1]['text'].lower(),
+                         r'analy[sz]e images|predict or detect|recognize patterns')
+
         image_comparison = 'Compare the role of images in the two papers.'
         selected = namespace['select_answer_evidence'](
             image_comparison, hybrid_search('outputs/library_index', image_comparison, k=20))
