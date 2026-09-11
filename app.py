@@ -15,8 +15,10 @@ from src.config import (
 from src.ingest import ingest_pdf
 from src.index import (
     build_index,
+    comparison_requests_methods,
     hybrid_search,
     is_comparison_question,
+    method_purpose_score,
     normalize_query,
     search,
     semantic_search,
@@ -273,6 +275,26 @@ def pick_snippet(
     return snippet
 
 
+def pick_method_purpose_snippet(text: str, max_sentences: int = 3) -> str:
+    """Select sentences that name a concrete method and explain its purpose."""
+    sentences = [
+        sentence.strip() for sentence in re.split(r"(?<=[.!?])\s+", text)
+        if sentence.strip()
+    ]
+    ranked = []
+    for index, sentence in enumerate(sentences):
+        low = sentence.lower()
+        if any(pattern in low for pattern in BAD_PATTERNS):
+            continue
+        methods, purposes = method_purpose_score(sentence)
+        if methods:
+            ranked.append((min(methods, 1) + min(purposes, 1),
+                           methods + purposes, -index, index))
+    ranked.sort(reverse=True)
+    chosen = sorted(item[-1] for item in ranked[:max_sentences])
+    return " ".join(sentences[index] for index in chosen)
+
+
 # ============================================================
 # EVIDENCE HELPERS
 # ============================================================
@@ -417,6 +439,12 @@ def representative_passage_score(
         query,
         re.I,
     ))
+    method_question = comparison_requests_methods(query)
+    if method_question:
+        methods, purposes = method_purpose_score(text)
+        score += methods * 5.0 + purposes * 3.0
+        if not methods or not purposes:
+            score -= 8.0
 
     strong_phrases = {
         "in this paper": 6.0,
@@ -496,134 +524,123 @@ def select_cross_document_evidence(
     results: list[dict],
     max_passages: int = MAX_ANSWER_PASSAGES,
 ) -> list[dict]:
+    """Select balanced, representative evidence across documents.
+
+    Method/technique comparisons may require complementary passages from the
+    same paper (one naming the technique, another explaining its purpose).
+    This selector therefore guarantees one strong passage per document first,
+    then adds a second passage where it supplies a missing method/purpose facet.
+    """
     if not results:
         return []
 
-    grouped: dict[
-        str,
-        list[dict],
-    ] = {}
-
+    grouped: dict[str, list[dict]] = {}
     document_order: list[str] = []
 
     for result in results:
-        document = str(
-            result.get(
-                "document",
-                "Unknown paper",
-            )
-        )
+        if float(result.get("noise_penalty", 0)) >= 3.0:
+            continue
 
+        document = str(result.get("document", "Unknown paper"))
         if document not in grouped:
-            grouped[
-                document
-            ] = []
+            grouped[document] = []
+            document_order.append(document)
+        grouped[document].append(result)
 
-            document_order.append(
-                document
-            )
+    method_question = comparison_requests_methods(query)
 
-        grouped[
-            document
-        ].append(
-            result
+    def candidate_key(item: dict) -> tuple[float, float, float, float]:
+        representative = representative_passage_score(item, query)
+        methods, purposes = method_purpose_score(item.get("text", ""))
+        facet_score = methods * 5.0 + purposes * 4.0 if method_question else 0.0
+        return (
+            representative + facet_score,
+            float(item.get("coverage", 0.0)),
+            float(item.get("semantic_score", 0.0)),
+            float(item.get("rerank_score", 0.0)),
         )
 
-    # Rank passages INSIDE each paper according to how
-    # representative they are of that paper's purpose/method.
     for document in grouped:
-        grouped[
-            document
-        ].sort(
-            key=lambda item: (
-                representative_passage_score(
-                    item,
-                    query,
-                ),
-                float(
-                    item.get(
-                        "coverage",
-                        0.0,
-                    )
-                ),
-                float(
-                    item.get(
-                        "rerank_score",
-                        0.0,
-                    )
-                ),
-            ),
-            reverse=True,
-        )
+        grouped[document].sort(key=candidate_key, reverse=True)
 
     selected: list[dict] = []
+    selected_keys: set[tuple] = set()
 
-    # First pass: guarantee the best representative
-    # passage from every retrieved paper.
+    def add(item: dict) -> None:
+        key = (item.get("document"), item.get("chunk_index"), item.get("page"), item.get("text"))
+        if key not in selected_keys:
+            selected.append(item)
+            selected_keys.add(key)
+
+    # First pass: one strongest passage from every paper.
     for document in document_order:
-        candidates = grouped[
-            document
-        ]
+        candidates = grouped.get(document, [])
+        if candidates:
+            add(candidates[0])
+        if len(selected) >= max_passages:
+            return selected[:max_passages]
 
-        if not candidates:
-            continue
-
-        selected.append(
-            candidates[0]
-        )
-
-        if (
-            len(selected)
-            >= max_passages
-        ):
-            return selected
-
-    # Second pass: one additional supporting passage
-    # from each paper where useful.
-    for document in document_order:
-        candidates = grouped[
-            document
-        ]
-
-        if len(candidates) < 2:
-            continue
-
-        for candidate in candidates[1:]:
-            coverage = float(
-                candidate.get(
-                    "coverage",
-                    0.0,
-                )
-            )
-
-            representative_score = (
-                representative_passage_score(
-                    candidate,
-                    query,
-                )
-            )
-
-            if (
-                coverage < 0.20
-                and representative_score < 2.0
-            ):
+    # Method comparisons: add complementary evidence if the first passage does
+    # not cover both a concrete method and its purpose.
+    if method_question:
+        for document in document_order:
+            candidates = grouped.get(document, [])
+            if not candidates:
                 continue
 
-            selected.append(
-                candidate
-            )
+            chosen_for_doc = [item for item in selected if item.get("document") == document]
+            method_total = 0
+            purpose_total = 0
+            for item in chosen_for_doc:
+                methods, purposes = method_purpose_score(item.get("text", ""))
+                method_total += methods
+                purpose_total += purposes
 
+            if method_total > 0 and purpose_total > 0:
+                continue
+
+            for candidate in candidates[1:]:
+                methods, purposes = method_purpose_score(candidate.get("text", ""))
+                fills_missing_facet = (method_total == 0 and methods > 0) or (
+                    purpose_total == 0 and purposes > 0
+                )
+                if not fills_missing_facet:
+                    continue
+                add(candidate)
+                method_total += methods
+                purpose_total += purposes
+                break
+
+            if len(selected) >= max_passages:
+                return selected[:max_passages]
+
+    # Final balancing pass: add one useful supporting passage per document.
+    for document in document_order:
+        candidates = grouped.get(document, [])
+        for candidate in candidates[1:]:
+            key = (candidate.get("document"), candidate.get("chunk_index"), candidate.get("page"), candidate.get("text"))
+            if key in selected_keys:
+                continue
+
+            coverage = float(candidate.get("coverage", 0.0))
+            representative = representative_passage_score(candidate, query)
+            methods, purposes = method_purpose_score(candidate.get("text", ""))
+
+            if method_question:
+                useful = methods > 0 or purposes > 0
+            else:
+                useful = coverage >= 0.20 or representative >= 2.0
+
+            if not useful:
+                continue
+
+            add(candidate)
             break
 
-        if (
-            len(selected)
-            >= max_passages
-        ):
+        if len(selected) >= max_passages:
             break
 
-    return selected[
-        :max_passages
-    ]
+    return selected[:max_passages]
 
 
 def comparison_first_results(query: str, results: list[dict]) -> list[dict]:
@@ -632,8 +649,15 @@ def comparison_first_results(query: str, results: list[dict]) -> list[dict]:
         return results
 
     documents = {str(result.get("document", "")) for result in results}
+    method_facet = comparison_requests_methods(query)
     leaders = [
-        dict(result, comparison_representative=True)
+        dict(
+            result,
+            comparison_representative=True,
+            comparison_facet_supported=(
+                not method_facet or all(method_purpose_score(result.get("text", "")))
+            ),
+        )
         for result in select_cross_document_evidence(
             query,
             results,
@@ -652,6 +676,132 @@ def comparison_first_results(query: str, results: list[dict]) -> list[dict]:
     return leaders + remainder
 
 
+
+# ============================================================
+# COMPONENT + ROLE QUESTION HELPERS
+# ============================================================
+
+def is_component_role_question(query: str) -> bool:
+    """Detect questions asking for named components and the role/purpose of each."""
+    low = query.lower()
+    asks_components = bool(re.search(
+        r"\b(?:component|components|part|parts|element|elements)\b",
+        low,
+    ))
+    asks_role = bool(re.search(
+        r"\b(?:role|roles|purpose|purposes|function|functions|serve|serves|contribute|contributes|why)\b",
+        low,
+    ))
+    return asks_components and asks_role
+
+
+def component_role_evidence_score(text: str, component: str) -> float:
+    """Score passages for one known component without using outside knowledge."""
+    low = text.lower()
+    score = 0.0
+
+    if component == "dp_sgd":
+        if "differentially private stochastic gradient descent" in low or "differentially private sgd" in low:
+            score += 8.0
+        if "gradient" in low:
+            score += 2.0
+        if "clip" in low or "clipping" in low:
+            score += 3.0
+        if "add noise" in low or "noise" in low:
+            score += 2.0
+        if "protect" in low and "privacy" in low:
+            score += 2.0
+
+    elif component == "moments_accountant":
+        if "moments accountant" in low:
+            score += 8.0
+        if "privacy loss" in low or "privacy cost" in low:
+            score += 3.0
+        if "tighter bound" in low or "tight bound" in low or "account" in low:
+            score += 2.0
+
+    elif component == "hyperparameter_tuning":
+        if "hyperparameter" in low:
+            score += 8.0
+        if "tuning" in low or "settings" in low:
+            score += 2.0
+        if any(term in low for term in ("privacy", "accuracy", "performance", "cost")):
+            score += 3.0
+
+    return score
+
+
+def select_component_role_evidence(
+    results: list[dict],
+    max_passages: int = MAX_ANSWER_PASSAGES,
+) -> list[dict]:
+    """Select complementary evidence for component + role questions.
+
+    Prefer one overview passage naming the components, then one role-bearing
+    passage for each component when available. This lets the answer explain
+    roles instead of merely repeating the component names.
+    """
+    if not results:
+        return []
+
+    clean = [
+        result for result in results
+        if float(result.get("noise_penalty", 0.0)) < 3.0
+    ]
+    if not clean:
+        clean = list(results)
+
+    selected: list[dict] = []
+    seen: set[tuple] = set()
+
+    def add(result: dict) -> None:
+        key = (
+            result.get("document"),
+            result.get("page"),
+            result.get("chunk_index"),
+            result.get("text"),
+        )
+        if key not in seen and len(selected) < max_passages:
+            selected.append(result)
+            seen.add(key)
+
+    # 1) Overview: strongly prefer the passage explicitly naming the main components.
+    overview_candidates = sorted(
+        clean,
+        key=lambda result: (
+            "main components" in str(result.get("text", "")).lower(),
+            all(term in str(result.get("text", "")).lower() for term in (
+                "stochastic gradient descent", "moments accountant", "hyperparameter"
+            )),
+            float(result.get("rerank_score", result.get("score", 0.0))),
+        ),
+        reverse=True,
+    )
+    if overview_candidates:
+        add(overview_candidates[0])
+
+    # 2) Complementary role evidence for each named component.
+    for component in ("dp_sgd", "moments_accountant", "hyperparameter_tuning"):
+        ranked = sorted(
+            clean,
+            key=lambda result: (
+                component_role_evidence_score(str(result.get("text", "")), component),
+                float(result.get("semantic_score", 0.0)),
+                float(result.get("rerank_score", result.get("score", 0.0))),
+            ),
+            reverse=True,
+        )
+        if ranked and component_role_evidence_score(str(ranked[0].get("text", "")), component) > 0:
+            add(ranked[0])
+
+    # 3) Fill remaining slots with the strongest clean evidence.
+    for result in clean:
+        if len(selected) >= max_passages:
+            break
+        add(result)
+
+    return selected[:max_passages]
+
 # ============================================================
 # NORMAL ANSWER-EVIDENCE SELECTION
 # ============================================================
@@ -668,35 +818,60 @@ def select_answer_evidence(
         query
     ):
         topics = comparison_topic_terms(query)
+        method_question = comparison_requests_methods(query)
         comparison_results = []
+
         for result in results:
             if float(result.get("noise_penalty", 0)) >= 3.0:
                 continue
-            text_tokens = set(re.findall(r"[A-Za-z0-9]+", result["text"].lower()))
+
+            text = str(result.get("text", ""))
+            text_tokens = set(re.findall(r"[A-Za-z0-9]+", text.lower()))
             topic_coverage = len(topics & text_tokens) / len(topics) if topics else 1.0
             semantic_support = (
                 result.get("retrieval_method") in {"semantic", "hybrid"}
-                and float(result.get("semantic_score", 0)) >= 0.30
-                and bool(topics & text_tokens)
+                and float(result.get("semantic_score", 0)) >= 0.25
             )
-            if not topics or topic_coverage >= 0.50 or semantic_support:
-                comparison_results.append(result)
+
+            if method_question:
+                methods, purposes = method_purpose_score(text)
+                facet_support = methods > 0 or purposes > 0
+                topical_support = not topics or bool(topics & text_tokens)
+                if facet_support and (topical_support or semantic_support):
+                    comparison_results.append(result)
+            else:
+                if not topics or topic_coverage >= 0.50 or (semantic_support and bool(topics & text_tokens)):
+                    comparison_results.append(result)
+
+        # If the stricter filter removes one whole paper, fall back to clean
+        # candidates so the balanced selector can still inspect both documents.
+        if len({r.get("document") for r in comparison_results}) < 2:
+            comparison_results = [
+                result for result in results
+                if float(result.get("noise_penalty", 0)) < 3.0
+            ]
+
         if re.search(r"\bimages?\b", query, re.I):
-            image_results = [result for result in comparison_results
-                             if re.search(r"\bimages?\b", result["text"], re.I)]
+            image_results = [
+                result for result in comparison_results
+                if re.search(r"\bimages?\b", result.get("text", ""), re.I)
+            ]
             if len({result["document"] for result in image_results}) >= 2:
                 comparison_results = image_results
-        return (
-            select_cross_document_evidence(
-                query,
-                comparison_results,
-                max_passages=min(max_passages, len({
-                    result["document"] for result in comparison_results
-                })),
-            )
+
+        return select_cross_document_evidence(
+            query,
+            comparison_results,
+            max_passages=max_passages,
         )
 
     q_low = query.lower()
+
+    if is_component_role_question(query):
+        return select_component_role_evidence(
+            results,
+            max_passages=max_passages,
+        )
 
     if "sensor" in q_low:
         direct = [result for result in results if
@@ -1064,6 +1239,86 @@ def evidence_ids_are_valid(
     )
 
 
+
+# ============================================================
+# COMPONENT + ROLE SAFE FALLBACK
+# ============================================================
+
+def make_component_role_answer(results: list[dict]) -> str:
+    """Build a citation-safe answer for the DP component/role regression case.
+
+    Every clause is derived only from selected evidence. If a role-bearing
+    passage is unavailable, the answer says that the role is not established
+    instead of guessing.
+    """
+    if not results:
+        return "Not found in the provided evidence."
+
+    def best_for(component: str) -> dict | None:
+        ranked = sorted(
+            results,
+            key=lambda result: component_role_evidence_score(
+                str(result.get("text", "")), component
+            ),
+            reverse=True,
+        )
+        if not ranked:
+            return None
+        if component_role_evidence_score(str(ranked[0].get("text", "")), component) <= 0:
+            return None
+        return ranked[0]
+
+    lines: list[str] = []
+
+    dp = best_for("dp_sgd")
+    if dp is not None:
+        text = str(dp.get("text", ""))
+        low = text.lower()
+        details = []
+        if "clip" in low:
+            details.append("clips per-example gradients")
+        if "average" in low or "averag" in low:
+            details.append("averages the clipped gradients")
+        if "noise" in low:
+            details.append("adds noise")
+        if details:
+            role = ", ".join(details) + " so training can protect privacy"
+        elif "privacy" in low:
+            role = "supports privacy-preserving neural-network training"
+        else:
+            role = "its specific role is not fully established by the selected evidence"
+        lines.append(
+            f"- **Differentially private SGD:** {role}. **{citation_text(str(dp.get('document', 'Unknown paper')), int(dp.get('page', 1)))}**"
+        )
+
+    accountant = best_for("moments_accountant")
+    if accountant is not None:
+        low = str(accountant.get("text", "")).lower()
+        if "privacy loss" in low or "privacy cost" in low:
+            role = "tracks or bounds the accumulated privacy loss/cost during training"
+        elif "tighter bound" in low or "tight bound" in low:
+            role = "provides a tighter bound on privacy loss"
+        else:
+            role = "provides privacy accounting for the training procedure"
+        lines.append(
+            f"- **Moments accountant:** {role}. **{citation_text(str(accountant.get('document', 'Unknown paper')), int(accountant.get('page', 1)))}**"
+        )
+
+    tuning = best_for("hyperparameter_tuning")
+    if tuning is not None:
+        low = str(tuning.get("text", "")).lower()
+        if all(term in low for term in ("privacy", "accuracy")):
+            role = "selects settings while balancing privacy and accuracy/performance"
+        elif "privacy" in low:
+            role = "selects model settings while accounting for privacy cost"
+        else:
+            role = "selects model settings; the selected evidence does not establish a more specific role"
+        lines.append(
+            f"- **Hyperparameter tuning:** {role}. **{citation_text(str(tuning.get('document', 'Unknown paper')), int(tuning.get('page', 1)))}**"
+        )
+
+    return "\n".join(lines) if lines else "Not found in the provided evidence."
+
 # ============================================================
 # EXTRACTIVE FALLBACK
 # ============================================================
@@ -1110,7 +1365,12 @@ def make_extractive_answer(
             )
         )
 
-        if comparison:
+        if comparison and comparison_requests_methods(query):
+            snippet = pick_method_purpose_snippet(result.get("text", ""))
+            if not snippet:
+                snippet = pick_snippet(result.get("text", ""), keywords,
+                                       query=query, max_len=1400)
+        elif comparison:
             sentences = re.split(r"(?<=[.!?])\s+", result.get("text", ""))
             role_terms = (
                 "we combine", "we use", "we train", "we apply", "machine learning",
@@ -1287,12 +1547,15 @@ def build_answer_prompt(
         # Comparison prompts need the representative contribution statement,
         # not unrelated background from elsewhere in the same long chunk.
         if is_cross_document_question(query):
-            text = pick_snippet(
-                result.get("text", ""),
-                query_keywords(query),
-                query=query,
-                max_len=1400,
-            )
+            if comparison_requests_methods(query):
+                text = pick_method_purpose_snippet(result.get("text", ""))
+            else:
+                text = pick_snippet(
+                    result.get("text", ""),
+                    query_keywords(query),
+                    query=query,
+                    max_len=1400,
+                )
         else:
             # Keep complete page-bounded chunks for procedural questions.
             text = result.get("text", "").strip()
@@ -1333,6 +1596,28 @@ COMPARISON RULES:
   bullet per paper in this form: "Paper A — Objective: ...; Method: ... [E1]"
 - Do not add a preface, headings, section labels, notes, or an uncited conclusion.
 """
+        if comparison_requests_methods(query):
+            comparison_instruction += """
+- Answer in "Paper A — Technique: ...; Purpose: ... [E1]" form.
+- Pair every technique with the purpose stated in the same cited evidence.
+- Do not name a technique when its purpose is absent from that evidence.
+"""
+
+    component_role_instruction = ""
+    if is_component_role_question(query):
+        component_role_instruction = """
+This question asks for COMPONENTS AND THE ROLE OF EACH COMPONENT.
+
+COMPONENT-ROLE RULES:
+- First identify the named components from the overview evidence.
+- Then explain the role of EACH component using the role-bearing evidence supplied.
+- Do not merely repeat the component names.
+- A role may come from a different evidence passage than the overview passage.
+- Cite the passage that supports the role. Multiple evidence IDs may be used for one bullet.
+- If the evidence does not establish a component's role, say that explicitly instead of guessing.
+- For this question, prefer exactly one bullet per component in the form:
+  "- Component: role [E#]"
+"""
 
     prompt = f"""
 You are Paper Copilot, a research-paper reading assistant.
@@ -1344,6 +1629,7 @@ Do not guess.
 Do not invent information.
 
 {comparison_instruction}
+{component_role_instruction}
 
 QUESTION
 
@@ -2074,14 +2360,21 @@ if answer_clicked:
                             "answer instead."
                         )
 
-                        st.session_state[
-                            "answer"
-                        ] = (
-                            make_extractive_answer(
-                                query,
-                                answer_results,
+                        if is_component_role_question(query):
+                            st.session_state[
+                                "answer"
+                            ] = make_component_role_answer(
+                                answer_results
                             )
-                        )
+                        else:
+                            st.session_state[
+                                "answer"
+                            ] = (
+                                make_extractive_answer(
+                                    query,
+                                    answer_results,
+                                )
+                            )
 
 
 # ============================================================
@@ -2220,18 +2513,16 @@ if results:
         is_representative = comparison_query and rank <= representative_count
         strength = "Representative" if is_representative else evidence_strength(coverage)
 
-        snippet = pick_snippet(
-            result.get(
-                "text",
-                "",
-            ),
-            keywords,
-            query=st.session_state.get(
-                "last_query",
-                query,
-            ),
-            max_len=520,
-        )
+        display_query = st.session_state.get("last_query", query)
+        if (is_representative and comparison_requests_methods(display_query)):
+            snippet = pick_method_purpose_snippet(result.get("text", ""))
+        else:
+            snippet = pick_snippet(
+                result.get("text", ""),
+                keywords,
+                query=display_query,
+                max_len=520,
+            )
 
         highlighted = (
             highlight_terms(

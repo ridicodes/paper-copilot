@@ -1,6 +1,6 @@
-streamlit==1.63.0
-pymupdf==1.28.2
-rank-bm25==0.2.2
-numpy==2.5.2
-requests==2.34.2
-sentence-transformers==6.0.1
+streamlit>=1.40,<2
+pymupdf>=1.24,<2
+rank-bm25>=0.2.2,<1
+numpy>=1.26,<3
+sentence-transformers>=5,<7
+requests>=2.31,<3

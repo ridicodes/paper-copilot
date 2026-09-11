@@ -1254,10 +1254,14 @@ def hybrid_search(idx_dir, query, k=5, min_score=0.0,
             "extracting their features", "predict or detect", "recognize patterns",
         )
 
+        method_facet = comparison_requests_methods(query)
+
         def document_summary_score(candidate):
             low = candidate.get("text", "").lower()
             signal = sum(phrase in low for phrase in summary_phrases)
-            return (signal, candidate["hybrid_score"])
+            methods, purposes = method_purpose_score(low)
+            facet = min(methods, 1) + min(purposes, 1) if method_facet else 0
+            return (facet, methods + purposes, signal, candidate["hybrid_score"])
 
         first_by_document = {}
         for candidate in candidates:
@@ -1266,7 +1270,13 @@ def hybrid_search(idx_dir, query, k=5, min_score=0.0,
             if current is None or document_summary_score(candidate) > document_summary_score(current):
                 first_by_document[document] = candidate
         leaders = [
-            dict(item, comparison_representative=True)
+            dict(
+                item,
+                comparison_representative=True,
+                comparison_facet_supported=(
+                    not method_facet or all(method_purpose_score(item.get("text", "")))
+                ),
+            )
             for item in sorted(
                 first_by_document.values(), key=document_summary_score, reverse=True,
             )
@@ -1301,6 +1311,34 @@ def is_comparison_question(query: str) -> bool:
         low,
     ))
     return explicit_comparison or (document_scope and (contrast_intent or per_document_intent))
+
+
+def comparison_requests_methods(query: str) -> bool:
+    """Return whether a comparison explicitly asks how or by what technique."""
+    low = normalize_query(query).lower()
+    return bool(re.search(
+        r"\b(?:technique|method|algorithm|procedure|mechanism)\w*\b",
+        low,
+    ))
+
+
+def method_purpose_score(text: str) -> tuple[int, int]:
+    """Score concrete named/operational methods and statements of their purpose."""
+    low = text.lower()
+    method_patterns = (
+        r"\b(?:algorithm|technique|method|procedure)\w*\b",
+        r"\b(?:sgd|pca|crf|ann)\b",
+        r"\b(?:gradient|clip|clipping|noise|accountant|filtering|segmentation)\w*\b",
+        r"\b(?:region(?:al)? growth|split and merge|object detection|feature extraction)\b",
+    )
+    purpose_patterns = (
+        r"\b(?:in order to|used to|useful for|allows? us to)\b",
+        r"\b(?:protect|reduce|remove|recognize|detect|segment|search|extract|track)\w*\b",
+        r"\bprivacy (?:cost|loss|guarantee)\w*\b",
+    )
+    methods = sum(bool(re.search(pattern, low)) for pattern in method_patterns)
+    purposes = sum(bool(re.search(pattern, low)) for pattern in purpose_patterns)
+    return methods, purposes
 
 
 def is_methodology_question(query: str) -> bool:

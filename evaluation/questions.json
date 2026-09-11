@@ -1,0 +1,65 @@
+[
+  {
+    "id": "cv_stages",
+    "question": "What are the main stages of image analysis?",
+    "expected_documents": ["Computer_Vision_and_Image_Processing_A_Paper_Revie.pdf"],
+    "expected_pages": {"Computer_Vision_and_Image_Processing_A_Paper_Revie.pdf": [2]},
+    "notes": "Known strong regression: the five stages occur on page 2."
+  },
+  {
+    "id": "cv_weaknesses",
+    "question": "What weaknesses of region-based segmentation techniques are discussed in the paper?",
+    "expected_documents": ["Computer_Vision_and_Image_Processing_A_Paper_Revie.pdf"],
+    "expected_pages": {},
+    "notes": "Single-paper conceptual retrieval regression."
+  },
+  {
+    "id": "cv_applications",
+    "question": "What applications of computer vision are mentioned in the paper?",
+    "expected_documents": ["Computer_Vision_and_Image_Processing_A_Paper_Revie.pdf"],
+    "expected_pages": {"Computer_Vision_and_Image_Processing_A_Paper_Revie.pdf": [2]},
+    "notes": "Applications are discussed in the introductory/literature-review section."
+  },
+  {
+    "id": "dp_components",
+    "question": "What are the main components of the differentially private deep learning approach, and what role does each component play?",
+    "expected_documents": ["1607.00133v2 copy.pdf"],
+    "expected_pages": {"1607.00133v2 copy.pdf": [2, 3, 4, 6]},
+    "notes": "Should retrieve the three-component overview plus supporting role passages."
+  },
+  {
+    "id": "dp_training",
+    "question": "How does the paper protect privacy while training the neural network?",
+    "expected_documents": ["1607.00133v2 copy.pdf"],
+    "expected_pages": {"1607.00133v2 copy.pdf": [3]},
+    "notes": "Expected evidence includes clipping/noise/private SGD details."
+  },
+  {
+    "id": "cross_ml_difference",
+    "question": "How do the two papers use machine learning differently, and what problem does each paper aim to solve?",
+    "expected_documents": [
+      "1607.00133v2 copy.pdf",
+      "Computer_Vision_and_Image_Processing_A_Paper_Revie.pdf"
+    ],
+    "expected_pages": {},
+    "notes": "Cross-document semantic comparison regression."
+  },
+  {
+    "id": "cross_methods",
+    "question": "Compare the main techniques used in the two papers. How does each technique contribute to solving the paper's central problem?",
+    "expected_documents": [
+      "1607.00133v2 copy.pdf",
+      "Computer_Vision_and_Image_Processing_A_Paper_Revie.pdf"
+    ],
+    "expected_pages": {},
+    "notes": "Cross-document method/purpose aggregation regression."
+  },
+  {
+    "id": "unsupported_yolo",
+    "question": "What accuracy does the YOLOv8 model achieve on the COCO dataset?",
+    "expected_documents": [],
+    "expected_pages": {},
+    "expected_no_support": true,
+    "notes": "Negative control: the library should refuse rather than hallucinate."
+  }
+]
