@@ -17,10 +17,12 @@ SEMANTIC_THRESHOLD = 0.55
 METHODOLOGY_SEMANTIC_THRESHOLD = 0.35
 CURRENCY_WORDS = {"dollar", "dollars", "usd", "euro", "euros", "rupee", "rupees"}
 COMPARISON_META_TERMS = {
-    "address", "addresses", "aim", "aims", "approach", "approaches",
+    "achieve", "achieved", "achieves", "address", "addresses", "aim", "aims",
+    "approach", "approaches",
     "both", "challenge", "challenges", "compare", "compared", "comparison",
     "contrast", "differ", "difference", "differences", "differently", "does", "each",
-    "goal", "goals", "method", "methods", "paper", "papers", "problem",
+    "goal", "goals", "method", "methods", "objective", "objectives", "paper",
+    "papers", "problem",
     "problems", "purpose", "purposes", "role", "roles", "similar",
     "similarities", "similarity", "solve", "solves", "their", "try", "two",
     "use", "uses",
@@ -94,7 +96,14 @@ def evidence_is_sufficient(query: str, results: list[dict], comparison=False) ->
             # ("each paper", "their approaches"). In that case, clean evidence
             # from each document is sufficient; topical prompts still need lexical
             # topic overlap or independently strong semantic support.
-            if (not topics or topic_coverage >= 0.50
+            representative_support = (
+                not topics
+                and bool(item.get("comparison_representative"))
+                and item.get("retrieval_method") in {"semantic", "hybrid"}
+                and (float(item.get("hybrid_score", 0)) > 0
+                     or float(item.get("semantic_score", 0)) >= 0.05)
+            )
+            if (representative_support or (bool(topics) and topic_coverage >= 0.50)
                     or (semantic_support and bool(topics & tokens))):
                 documents.add(item["document"])
         return len(documents) >= 2

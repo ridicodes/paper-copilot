@@ -3,6 +3,7 @@ from src.citations import (
     citations_are_complete,
     comparison_citations_cover_documents,
     normalize_answer,
+    normalize_comparison_answer,
     repair_comparison_synthesis_citations,
 )
 
@@ -59,3 +60,33 @@ class CitationTests(unittest.TestCase):
         one_sided = answer.replace('[E2]', '[E1]')
         self.assertEqual(repair_comparison_synthesis_citations(one_sided, evidence), one_sided)
         self.assertFalse(citations_are_complete(one_sided))
+
+        trailing_only = (
+            '- Paper A: Objective is privacy. Method is private training. [E1]\n'
+            '- Paper B: Objective is recognition. Method is image analysis. [E2]'
+        )
+        repaired_bullets = repair_comparison_synthesis_citations(
+            trailing_only, evidence)
+        self.assertTrue(citations_are_complete(repaired_bullets))
+        self.assertEqual(repaired_bullets.count('[E1]'), 2)
+        self.assertEqual(repaired_bullets.count('[E2]'), 2)
+
+    def test_comparison_normalization_removes_only_known_wrappers(self):
+        wrapped = (
+            'Based on the provided evidence, here is the answer to the question:\n\n'
+            '**Main objective of each paper:**\n'
+            '- Paper A — Objective: privacy [E1]. Method: private training [E1].\n'
+            '- Paper B — Objective: image analysis [E2]. Method: vision [E2].\n'
+            'Note: The evidence does not provide more implementation detail.'
+        )
+        normalized = normalize_comparison_answer(wrapped)
+        self.assertNotIn('here is the answer', normalized.lower())
+        self.assertNotIn('Main objective', normalized)
+        self.assertNotIn('Note:', normalized)
+        self.assertTrue(citations_are_complete(normalized))
+
+        uncited_claim = normalized + '\nBoth methods are universally reliable.'
+        self.assertIn('universally reliable',
+                      normalize_comparison_answer(uncited_claim))
+        self.assertFalse(citations_are_complete(
+            normalize_comparison_answer(uncited_claim)))

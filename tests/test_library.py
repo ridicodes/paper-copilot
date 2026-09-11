@@ -150,6 +150,24 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(len({result['document'] for result in generic_results[:2]}), 2)
         self.assertTrue(namespace['evidence_is_sufficient'](generic_results, generic))
 
+        objective = (
+            'What is the main objective of each paper, and what methods does each '
+            'use to achieve that objective?'
+        )
+        objective_results = namespace['comparison_first_results'](
+            objective, hybrid_search('outputs/library_index', objective, k=20))
+        self.assertEqual(len({result['document'] for result in objective_results[:2]}), 2)
+        self.assertTrue(all(result.get('comparison_representative')
+                            for result in objective_results[:2]))
+        self.assertTrue(namespace['evidence_is_sufficient'](
+            objective_results, objective))
+        objective_selected = namespace['select_answer_evidence'](
+            objective, objective_results)
+        objective_prompt, _ = namespace['build_answer_prompt'](
+            objective, objective_selected)
+        self.assertIn('exactly one\n  bullet per paper', objective_prompt)
+        self.assertIn('Do not add a preface', objective_prompt)
+
         image_comparison = 'Compare the role of images in the two papers.'
         selected = namespace['select_answer_evidence'](
             image_comparison, hybrid_search('outputs/library_index', image_comparison, k=20))

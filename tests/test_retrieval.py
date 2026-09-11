@@ -68,14 +68,17 @@ class RetrievalTests(unittest.TestCase):
         self.assertFalse(evidence_is_sufficient('Compare both papers', [result], comparison=True))
         self.assertFalse(evidence_is_sufficient('Privacy?', [dict(result, noise_penalty=4)]))
         self.assertFalse(evidence_is_sufficient('Unknown topic?', [dict(result, semantic_score=.1)]))
-        other = dict(result, document='b.pdf', text='Vision analyzes images.')
+        representative = dict(result, comparison_representative=True,
+                              hybrid_score=0.02)
+        other = dict(representative, document='b.pdf',
+                     text='Vision analyzes images.')
         self.assertTrue(evidence_is_sufficient(
             'What challenge does each paper address, and how do their approaches differ?',
-            [result, other], comparison=True,
+            [representative, other], comparison=True,
         ))
         self.assertFalse(evidence_is_sufficient(
             'How do both papers discuss medieval poetry?',
-            [result, other], comparison=True,
+            [representative, other], comparison=True,
         ))
 
     def test_comparison_detection_uses_whole_words(self):

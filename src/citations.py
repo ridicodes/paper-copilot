@@ -71,7 +71,33 @@ def repair_comparison_synthesis_citations(
     repairs = 0
     for line in answer.splitlines():
         stripped = line.strip()
-        if not stripped or re.search(r"\[E\d+\]", stripped, re.I):
+        line_ids = [match.upper() for match in re.findall(r"\[(E\d+)\]", stripped, re.I)]
+        if stripped and line_ids and re.match(r"^\s*[-*•]\s+Paper\s+[A-Z0-9]+\b", line, re.I):
+            line_documents = {
+                str(evidence_map[evidence_id].get("document", ""))
+                for evidence_id in line_ids
+            }
+            if len(line_documents) == 1:
+                source_citations = " ".join(f"[{evidence_id}]" for evidence_id in dict.fromkeys(line_ids))
+                normalized_line = re.sub(
+                    r"([.!?])\s*((?:\[E\d+\][ \t]*)+)",
+                    r" \2\1",
+                    line.strip(),
+                    flags=re.I,
+                )
+                units = re.split(r"(?<=[.!?])\s+", normalized_line)
+                if all(re.search(r"\[E\d+\]", unit, re.I) for unit in units):
+                    repaired_lines.append(line)
+                    continue
+                repaired_units = [
+                    unit if re.search(r"\[E\d+\]", unit, re.I)
+                    else f"{unit.rstrip()} {source_citations}"
+                    for unit in units
+                    if unit.strip()
+                ]
+                repaired_lines.append(" ".join(repaired_units))
+                continue
+        if not stripped or line_ids:
             repaired_lines.append(line)
             continue
 
@@ -94,6 +120,36 @@ def repair_comparison_synthesis_citations(
             repaired_lines.append(line)
 
     return "\n".join(repaired_lines).strip()
+
+
+def normalize_comparison_answer(answer: str) -> str:
+    """Remove only known non-answer wrappers from a comparison response."""
+    kept: list[str] = []
+    for line in answer.splitlines():
+        stripped = line.strip()
+        plain = stripped.replace("**", "").replace("__", "").strip()
+        if not stripped:
+            continue
+        if re.match(
+            r"^(?:based on (?:the )?(?:provided|supplied) evidence,?\s*)?"
+            r"(?:here is|this is) the answer(?: to the question)?\s*:?$",
+            plain,
+            re.I,
+        ):
+            continue
+        if (not re.search(r"\[E\d+\]", stripped, re.I)
+                and stripped.startswith(("**", "__"))
+                and plain.endswith(":")
+                and not re.search(r"[.!?]", plain)):
+            continue
+        if re.match(
+            r"^note:\s+the (?:provided )?evidence does not provide\b",
+            plain,
+            re.I,
+        ):
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip()
 
 
 def comparison_citations_cover_documents(

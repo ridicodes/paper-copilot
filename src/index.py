@@ -1265,7 +1265,12 @@ def hybrid_search(idx_dir, query, k=5, min_score=0.0,
             current = first_by_document.get(document)
             if current is None or document_summary_score(candidate) > document_summary_score(current):
                 first_by_document[document] = candidate
-        leaders = sorted(first_by_document.values(), key=document_summary_score, reverse=True)
+        leaders = [
+            dict(item, comparison_representative=True)
+            for item in sorted(
+                first_by_document.values(), key=document_summary_score, reverse=True,
+            )
+        ]
         leader_ids = {item["chunk_index"] for item in leaders}
         candidates = leaders + [item for item in candidates
                                 if item["chunk_index"] not in leader_ids]

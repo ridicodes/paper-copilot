@@ -31,6 +31,7 @@ from src.citations import (
     citations_are_complete,
     comparison_citations_cover_documents,
     normalize_answer,
+    normalize_comparison_answer,
     repair_comparison_synthesis_citations,
 )
 from src.index import is_methodology_question, methodology_score
@@ -630,11 +631,14 @@ def comparison_first_results(query: str, results: list[dict]) -> list[dict]:
         return results
 
     documents = {str(result.get("document", "")) for result in results}
-    leaders = select_cross_document_evidence(
-        query,
-        results,
-        max_passages=len(documents),
-    )
+    leaders = [
+        dict(result, comparison_representative=True)
+        for result in select_cross_document_evidence(
+            query,
+            results,
+            max_passages=len(documents),
+        )
+    ]
     leader_keys = {
         (result.get("document"), result.get("chunk_index"), result.get("page"))
         for result in leaders
@@ -1314,6 +1318,9 @@ COMPARISON RULES:
 - Clearly distinguish Paper A from Paper B.
 - Do not claim a difference unless the supplied evidence supports both sides.
 - Keep the comparison concise.
+- When the question asks for each paper's objective and method, write exactly one
+  bullet per paper in this form: "Paper A — Objective: ...; Method: ... [E1]"
+- Do not add a preface, headings, section labels, notes, or an uncited conclusion.
 """
 
     prompt = f"""
@@ -2009,6 +2016,9 @@ if answer_clicked:
                     )
 
                     if is_cross_document_question(query):
+                        normalized_answer = normalize_comparison_answer(
+                            normalized_answer
+                        )
                         normalized_answer = repair_comparison_synthesis_citations(
                             normalized_answer,
                             evidence_map,
