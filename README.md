@@ -1,74 +1,65 @@
 # Paper Copilot
 
-Paper Copilot is a local Streamlit research-paper assistant that searches multiple PDFs with BM25, semantic embeddings, or hybrid retrieval, previews cited pages, and generates grounded answers with Ollama.
+Paper Copilot is a local Streamlit assistant for searching and comparing research papers. It indexes PDF text, retrieves evidence with BM25, semantic, or hybrid search, and asks a local Ollama model to answer with page citations. Answers are rejected or replaced with cited excerpts when the available evidence or model citations fail validation.
 
-## Week 3 retrieval improvements
+## Features
 
-- sentence-aware, page-bounded chunking
-- PDF hyphenation cleanup
-- stopword-aware BM25 tokenization
-- larger candidate pool before final ranking
-- query-term coverage bonus
-- exact phrase bonus
-- near-duplicate suppression
-- page diversity
-- BM25 score + query coverage shown in the UI
+- Multi-PDF research library with document and page metadata
+- BM25, semantic, and reciprocal-rank-fusion hybrid retrieval
+- Evidence sufficiency checks for unsupported and cross-paper questions
+- Local answer generation through Ollama
+- Citation validation and extractive fallback
+- Cited PDF page previews
+- A labelled 32-question retrieval and answer benchmark
 
-## Run
+## Requirements
+
+- Python 3.11 or newer
+- [Ollama](https://ollama.com/) for generated answers
+- About 500 MB of free space for Python packages and the embedding model
+
+## Setup
 
 ```bash
-source ~/.venvs/paper-copilot/bin/activate
-cd ~/Documents/Github/paper-copilot
+git clone <repository-url>
+cd paper-copilot
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
-python -m streamlit run app.py --server.port 8501
+ollama pull llama3.1:8b
 ```
 
-Upload your papers and click **Process / re-index library**. Older BM25-only indexes must be re-indexed to use semantic retrieval. Select the retrieval mode under **Advanced settings**; Hybrid is the default.
+Start Ollama, then launch the app:
 
-## Week 6 retrieval
+```bash
+ollama serve
+python -m streamlit run app.py
+```
 
-Semantic search uses `all-MiniLM-L6-v2`, loaded lazily from the local cache when available. The first use needs a model download. Embeddings are normalized for cosine similarity, following the [Sentence Transformers API](https://www.sbert.net/docs/package_reference/sentence_transformer/model.html). Hybrid search combines quality-adjusted BM25 and semantic ranks using reciprocal rank fusion, then applies duplicate suppression and per-document page diversity. Document/page metadata and evidence-ID citation replacement remain intact.
+Open the displayed local URL, upload one or more PDFs, and select **Process / re-index library**. The first semantic or hybrid search downloads `all-MiniLM-L6-v2` unless it is already cached.
 
-The answer guard accepts lexical coverage of at least 0.50 or semantic similarity of at least 0.55, excludes noisy passages, and checks explicit query identifiers against evidence. Procedural passages with similarity of at least 0.35 can supplement a strongly supported document when they describe concrete algorithm steps. Comparisons require support from at least two documents. These are prototype heuristics, not a guarantee of factual support.
+Runtime settings can be overridden with the environment variables listed in [`.env.example`](.env.example). Export them in the shell before starting Streamlit.
 
-Answer selection examines up to 20 candidates, prefers explicit definitions and procedures, and sends complete selected chunks to Ollama. Evidence cards continue to show short snippets. Citation validation checks both allowed evidence IDs and sentence completeness; invalid answers use source excerpts with trusted page citations. A targeted private-SGD check also falls back when the generated answer omits key algorithm operations. Citation validity does not establish factual entailment.
-
-### Validation (2026-09-10)
-
-The handoff's two-paper library contains 114 chunks with 384-dimensional embeddings. All seven handoff questions plus one privacy paraphrase were exercised against local `llama3.1:8b`:
-
-- Image-analysis stages: all five stages, CV page 2.
-- Region-based segmentation: both weaknesses, CV page 5.
-- Pattern recognition: definition and role, CV page 3.
-- Computer-vision applications: cited applications from the CV paper.
-- YOLOv8/COCO: blocked before model invocation; rejection also tested in all three retrieval modes.
-- Private training and its paraphrase: complete page 3 algorithm supplied; incomplete generated explanations replaced with cited excerpts covering gradients, clipping, averaging, noise, updates, and privacy accounting.
-- Cross-paper comparison: cited excerpts contrast private neural-network training with vision applications when generated prose fails citation validation.
-
-The final recorded live responses used the extractive fallback for private training, its paraphrase, and the comparison. Automated checks cover citation failures, method-prompt completeness, retrieval/index compatibility, mode changes, answer generation, and PDF page viewing for both documents. Thirteen tests pass with the local-library checks enabled.
-
-Some relevant paraphrases remain below the conservative threshold, and Semantic-only comparison retrieval can abstain. Broader evaluation and threshold calibration remain Week 7 work. This small benchmark does not establish that Hybrid is universally better than BM25.
-
-Run deterministic tests without a model download:
+## Validation
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-Also run local-library retrieval and Streamlit checks when the handoff's PDFs, index, and cached model are present:
+With the two-paper development library and embedding model present, run the integration suite offline:
 
 ```bash
-PAPER_COPILOT_LIBRARY_TESTS=1 HF_HUB_OFFLINE=1 python -m unittest discover -s tests -v
+PAPER_COPILOT_LIBRARY_TESTS=1 HF_HUB_OFFLINE=1 \
+  python -m unittest discover -s tests -v
 ```
 
-Repeat the live benchmark with Ollama running (run from the repository root):
+The Week 7 benchmark contains 32 labelled questions. Hybrid retrieval achieved 100% Hit@5, unsupported-question rejection, comparison document coverage, and final grounded-answer rate on this small local dataset. BM25 had the best Hit@1 and MRR. See [WEEK7_EVALUATION.md](WEEK7_EVALUATION.md) for the protocol, results, and limitations.
 
-```bash
-HF_HUB_OFFLINE=1 python scripts/validate_week6.py --live
-```
+## Documentation
 
-The report defaults to `/tmp/paper-copilot-week6-validation.json`; generated reports and indexes should not be committed.
+- [Architecture](docs/ARCHITECTURE.md)
+- [Demo guide](docs/DEMO.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
 
-## Week 7 evaluation
-
-The labelled 32-question benchmark, retrieval and answer evaluators, measured results, tuning rationale, and limitations are documented in [WEEK7_EVALUATION.md](WEEK7_EVALUATION.md). On this local set, BM25 has the best Hit@1 and MRR, while Hybrid reaches 100% Hit@5, unsupported rejection, comparison document coverage, and final grounded-answer rate, with no reference-noise passages in the top five.
+Uploaded papers, extracted text, indexes, and model traffic remain on the local machine. Paper Copilot is a prototype research aid; verify cited pages before relying on an answer.

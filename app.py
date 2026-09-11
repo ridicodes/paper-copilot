@@ -2,11 +2,24 @@ from pathlib import Path
 import html
 import re
 
-import fitz
+import pymupdf
 import streamlit as st
 
+from src.config import (
+    BAD_PATTERNS,
+    COMPARISON_SEARCH_K,
+    DEFAULT_OLLAMA_MODEL,
+    LIBRARY_INDEX_DIR,
+    MAX_ANSWER_PASSAGES,
+)
 from src.ingest import ingest_pdf
-from src.index import build_index, search, semantic_search, hybrid_search
+from src.index import (
+    build_index,
+    hybrid_search,
+    is_comparison_question,
+    search,
+    semantic_search,
+)
 from src.evidence import (
     evidence_is_sufficient as retrieval_is_sufficient,
     passage_is_relevant, supported_passages, methodology_answer_is_complete,
@@ -19,24 +32,6 @@ from src.index import is_methodology_question, methodology_score
 # ============================================================
 # CONFIGURATION
 # ============================================================
-
-BAD_PATTERNS = [
-    "issn",
-    "international journal",
-    "copyright",
-    "all rights reserved",
-    "no researchers usefulness definition",
-]
-
-MIN_ANSWER_COVERAGE = 0.50
-MAX_ANSWER_PASSAGES = 4
-
-# Comparison questions search more deeply than the visible
-# number of evidence cards.
-COMPARISON_SEARCH_K = 20
-
-LIBRARY_INDEX_DIR = Path("outputs") / "library_index"
-
 
 # ============================================================
 # QUERY HELPERS
@@ -89,32 +84,8 @@ def query_keywords(query: str) -> list[str]:
 def is_cross_document_question(
     query: str,
 ) -> bool:
-    q_low = query.lower()
-
-    comparison_phrases = [
-        "compare",
-        "comparison",
-        "compared",
-        "difference",
-        "differences",
-        "differently",
-        "similar",
-        "similarity",
-        "similarities",
-        "both papers",
-        "two papers",
-        "across the papers",
-        "across papers",
-        "between the papers",
-        "between these papers",
-        "how do the papers",
-        "how do these papers",
-    ]
-
-    return any(
-        re.search(rf"\b{re.escape(phrase)}\b", q_low)
-        for phrase in comparison_phrases
-    )
+    """Compatibility name for the shared comparison-question detector."""
+    return is_comparison_question(query)
 
 
 def split_sentences(text: str) -> list[str]:
@@ -1130,7 +1101,7 @@ def render_page_png(
     page_num: int,
     zoom: float = 1.8,
 ) -> bytes:
-    doc = fitz.open(
+    doc = pymupdf.open(
         pdf_path
     )
 
@@ -1139,7 +1110,7 @@ def render_page_png(
             page_num - 1
         )
 
-        matrix = fitz.Matrix(
+        matrix = pymupdf.Matrix(
             zoom,
             zoom,
         )
@@ -1707,7 +1678,7 @@ with col2:
         ollama_model = (
             st.text_input(
                 "Ollama model",
-                value="llama3.1:8b",
+                value=DEFAULT_OLLAMA_MODEL,
             )
         )
 

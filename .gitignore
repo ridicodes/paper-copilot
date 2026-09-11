@@ -182,3 +182,8 @@ cython_debug/
 
 # Generated evaluation runs (the labelled set and Markdown report are tracked)
 evaluation/*_results.json
+
+# Local paper libraries and operating-system metadata
+.DS_Store
+data/*.pdf
+outputs/

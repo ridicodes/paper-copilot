@@ -1251,8 +1251,11 @@ def hybrid_search(idx_dir, query, k=5, min_score=0.0,
 def is_comparison_question(query: str) -> bool:
     low = query.lower()
     return any(re.search(rf"\b{re.escape(term)}\b", low) for term in (
-        "compare", "comparison", "differently", "difference", "differences",
-        "both papers", "two papers", "between the papers", "across papers",
+        "compare", "comparison", "compared", "differently", "difference",
+        "differences", "similar", "similarity", "similarities", "both papers",
+        "two papers", "between the papers", "between these papers",
+        "across papers", "across the papers", "how do the papers",
+        "how do these papers",
     ))
 
 

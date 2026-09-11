@@ -2,7 +2,7 @@ import json
 import re
 from pathlib import Path
 
-import fitz
+import pymupdf
 
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 
@@ -84,7 +84,7 @@ def ingest_pdf(
     out_json = Path(out_json)
     out_json.parent.mkdir(parents=True, exist_ok=True)
 
-    doc = fitz.open(str(pdf_path))
+    doc = pymupdf.open(str(pdf_path))
     chunks: list[dict] = []
 
     try:
